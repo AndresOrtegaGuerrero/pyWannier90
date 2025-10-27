@@ -31,3 +31,7 @@ name = "Andres Ortega-Guerrero"
 dev = [
     "ruff"
 ]
+
+
+[tool.flit.module]
+name = "pywannier90"
