@@ -875,7 +875,7 @@ class W90:
         win_file.write("num_bands       = %d\n" % (self.num_bands_tot))
         win_file.write("num_wann       = %d\n" % (self.num_wann))
         win_file.write("\n")
-        win_file.write("Begin Unit_Cell_Cart\n")
+        win_file.write("begin unit_cell_cart\n")
         for row in range(3):
             win_file.write(
                 "%10.7f  %10.7f  %10.7f\n"
@@ -885,9 +885,9 @@ class W90:
                     self.real_lattice_loc[2, row],
                 )
             )
-        win_file.write("End Unit_Cell_Cart\n")
+        win_file.write("end unit_cell_cart\n")
         win_file.write("\n")
-        win_file.write("Begin atoms_cart\n")
+        win_file.write("begin atoms_cart\n")
         for atom in range(len(self.atom_symbols_loc)):
             win_file.write(
                 "%s  %7.7f  %7.7f  %7.7f\n"
@@ -898,7 +898,7 @@ class W90:
                     self.atoms_cart_loc[atom, 2],
                 )
             )
-        win_file.write("End atoms_cart\n")
+        win_file.write("end atoms_cart\n")
         win_file.write("\n")
         if self.use_bloch_phases:
             win_file.write("use_bloch_phases = T\n\n")
@@ -922,7 +922,7 @@ class W90:
                     self.kpt_latt_loc[kpt][2],
                 )
             )
-        win_file.write("End Kpoints\n")
+        win_file.write("end kpoints\n")
         win_file.close()
 
     def compute_M_matrix(self):
@@ -937,7 +937,8 @@ class W90:
 
         for k in range(nk):
             k1 = kpts_abs[k]
-            Cm = self.kmf.mo_coeff_kpts[k][:, self.band_included_list]
+            # Cm = self.kmf.mo_coeff_kpts[k][:, self.band_included_list]
+            Cm = self.mo_coeff_kpts[k][:, self.band_included_list]
 
             for nn in range(nb):
                 k2_index = (
@@ -946,8 +947,8 @@ class W90:
                 bvec = self.nncell[:, k, nn]  # lattice translation in reciprocal units
                 k2_scaled = self.kmf.kpts[k2_index] + bvec
                 k2 = self.cell.get_abs_kpts([k2_scaled])
-                Cn = self.kmf.mo_coeff_kpts[k2_index][:, self.band_included_list]
-
+                # Cn = self.kmf.mo_coeff_kpts[k2_index][:, self.band_included_list]
+                Cn = self.mo_coeff_kpts[k2_index][:, self.band_included_list]
                 s_AO = df.ft_ao.ft_aopair(
                     self.cell, -k2 + k1, kpti_kptj=[k2, k1], q=np.zeros(3)
                 )[0]
@@ -1237,7 +1238,7 @@ class W90:
             lwindow = []
         self.lwindow = lwindow
         # print("Lwindow shape", self.lwindow.shape)
-        # print("Lwindow")
+        print("Lwindow")
         print(self.lwindow)
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
@@ -1518,9 +1519,7 @@ class W90:
             lwindow = np.ones((self.num_kpts_loc, self.num_wann_loc), dtype=bool)
         else:
             lwindow = self.lwindow
-            lwindow = np.transpose(lwindow, axes=(1, 0))
-        print("Lwindow:")
-        print(lwindow)
+            lwindow = np.transpose(lwindow, axes=(1, 0)).astype(bool)
 
         for k_id in range(self.num_kpts_loc):
             mo_included = self.mo_coeff_kpts[k_id][:, self.band_included_list]

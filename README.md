@@ -4,16 +4,13 @@
 
 # pyWannier90: A Python interface for wannier90
 [wannier90](http://www.wannier.org/) is a well-established package to construct maximally-localied Wannier functions (MLWFs) as well as to perform MLWF-based analysis.
-pyWannier90 uses the library-mode of wannier90 to perform the wannierization on the wave function obtained by PySCF.
+pyWannier90 uses the library-mode of wannier90 to perform the wannierisation on the wave function obtained by PySCF.
 
 <img src="https://github.com/hungpham2017/pyWannier90/blob/master/doc/Si_sp3.png" width="500" align="middle">
 
 ## News:
 - pyWannier90 is now available for wannier90 community, check it out [here](http://www.wannier.org/download/).
 - pyWannier90 only supports the latest version from the wannier90 using the python wrap using F90Wrap .
-
-## pyWannier90 can use the wave function obtained by:
-- PySCF 1.5 and
 
 ## Why pyWannier90?
 - If you would like to construct MLWFs for the wave function obtained by [PySCF](https://github.com/pyscf/pyscf)
@@ -25,6 +22,14 @@ Install wannier90 and follow the instruction to build the wrap
 	```
 	make & make lib
 	```
+
+- Navigate to the $\text{wrap/}$ subdirectory where the $\text{f90wrap}$ $\text{Makefile}$ is located. Build the python module:
+
+	```
+	make
+	```
+	This step generates the Python extension module (_wan90.so) and the wrapper module (wan90.py).
+
 - Clone the repository and do
 	```
 	pip install .
