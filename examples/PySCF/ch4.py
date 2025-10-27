@@ -7,9 +7,9 @@ Example: a CH4 in a box.
 Construct four sp3-like Wannier functions from nine Bloch states.
 """
 
-from pyscf.pbc import gto, dft
-from pyscf.pbc.tools import pywannier90
+import pywannier90
 import numpy as np
+from pyscf.pbc import gto, dft
 
 cell = gto.Cell()
 cell.atom = """
@@ -21,8 +21,8 @@ cell.atom = """
 """
 cell.basis = "sto-3g"
 cell.a = np.eye(3) * 6.35
-cell.gs = [15] * 3
 cell.verbose = 5
+cell.unit = "Angstrom"
 cell.build()
 
 
@@ -34,12 +34,11 @@ ekpt = kmf.run()
 
 num_wann = 4
 keywords = """
-exclude_bands : 1,6-9
 begin projections
 C:sp3
 end projections
 """
 
-w90 = pywannier90.W90(kmf, cell, nk, num_wann, other_keywords=keywords)
+w90 = pywannier90.W90(kmf, cell, nk, num_wann, gamma=True, other_keywords=keywords)
 w90.kernel()
-w90.plot_wf(grid=[25, 25, 25], supercell=nk)
+w90.plot_wf(grid=[40, 40, 40], supercell=nk)

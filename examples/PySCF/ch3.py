@@ -7,22 +7,23 @@ Example: a CH3 radical in a box.
 Construct four sp3-like Wannier functions from nine Bloch states.
 """
 
-from pyscf.pbc import gto, dft
-from pyscf.pbc.tools import pywannier90
+import pywannier90
 import numpy as np
+from pyscf.pbc import gto, dft
+
 
 cell = gto.Cell()
 cell.atom = """
- C                  3.17500000    3.17500000    3.17500000
- H                  2.54626556    2.54626556    2.54626556
- H                  3.80373444    3.80373444    2.54626556
- H                  2.54626556    3.80373444    3.80373444
+C 3.175 3.175 3.175
+H 3.175 3.175 4.264
+H 4.1181 3.175 2.6305
+H 2.2319 3.175 2.6305
 """
-cell.basis = "sto-3g"
+cell.basis = "gth-dzv"
 cell.a = np.eye(3) * 6.35
-cell.gs = [15] * 3
 cell.spin = 1
 cell.verbose = 5
+cell.unit = "Angstrom"
 cell.build()
 
 
@@ -34,12 +35,14 @@ ekpt = kmf.run()
 
 num_wann = 4
 keywords = """
-exclude_bands : 1,6-8
+exclude_bands : 5-14
 begin projections
 C:sp3
 end projections
 """
 
-w90 = pywannier90.W90(kmf, cell, nk, num_wann, other_keywords=keywords)
+w90 = pywannier90.W90(
+    kmf, cell, nk, num_wann, gamma=True, spin="up", num_iter=20, other_keywords=keywords
+)
 w90.kernel()
-w90.plot_wf(grid=[25, 25, 25], supercell=nk)
+w90.plot_wf(grid=[40, 40, 40], supercell=nk)

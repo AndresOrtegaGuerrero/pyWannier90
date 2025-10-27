@@ -6,32 +6,14 @@ email: pqh3.14@gmail.com
 
 import os
 import time
+import wan90
+import operator
 import numpy as np
 from scipy.io import FortranFile
 import pyscf.data.nist as param
 from pyscf import lib
 from pyscf.pbc import df
 from pyscf.pbc.dft import numint
-import importlib
-import sys
-
-# This is the only place needed to be modified
-# The path for the libwannier90 library
-W90LIB = "/burg/home/hqp2000/pyWannier90/src"
-
-sys.path.append(W90LIB)
-
-
-found = importlib.util.find_spec("libwannier90") is not None
-if found:
-    import libwannier90
-else:
-    print(
-        "WARNING: Check the installation of libwannier90 and its path in pyscf/pbc/tools/pywannier90.py"
-    )
-    print("libwannier90 path: " + W90LIB)
-    print("libwannier90 can be found at: https://github.com/hungpham2017/pyWannier90")
-    raise ImportError
 
 
 def save_kmf(kmf, chkfile):
@@ -65,6 +47,94 @@ def load_kmf(chkfile):
 
     kmf = fake_kmf(kmf)
     return kmf
+
+
+def get_WF0s(num_kpts, kpts, supercell, grid, u_mo):
+    """
+    Inverse Fourier transform from k-space to real-space (L-space)
+    to reconstruct Wannier-like orbitals from Bloch functions.
+
+    Parameters
+    ----------
+    num_kpts : int
+        Number of k-points.
+    kpts : (num_kpts, 3) ndarray
+        Fractional k-point coordinates.
+    supercell : (3,) ndarray of int
+        Number of supercells along each lattice direction.
+    grid : (3,) ndarray of int
+        Grid points per primitive cell along x, y, z.
+    u_mo : complex ndarray, shape (num_kpts, Ngrid, num_bands)
+        Bloch orbital coefficients on the real-space grid.
+
+    Returns
+    -------
+    wf_real : complex ndarray, shape (Npoints, num_bands)
+        Reconstructed Wannier functions in real-space.
+        Npoints = ngx*ngs1 * ngy*ngs2 * ngz*ngs3
+    """
+    import numpy as np
+
+    # Extract dimensions
+
+    num_band = u_mo.shape[2]
+    ngs1, ngs2, ngs3 = supercell
+    ngx, ngy, ngz = grid
+
+    # Total grid points in supercell
+    num_pts1 = ngx * ngs1
+    num_pts2 = ngy * ngs2
+    num_pts3 = ngz * ngs3
+    num_pts_total = num_pts1 * num_pts2 * num_pts3
+
+    # Initialize output
+    wann_func = np.zeros((num_pts_total, num_band), dtype=np.complex128)
+
+    # Create grid indices for supercell
+    # Following C++ convention: range from -(ngs/2)*ng to ((ngs+1)/2)*ng
+    nxx_range = np.arange(-(ngs1 // 2) * ngx, ((ngs1 + 1) // 2) * ngx)
+    nyy_range = np.arange(-(ngs2 // 2) * ngy, ((ngs2 + 1) // 2) * ngy)
+    nzz_range = np.arange(-(ngs3 // 2) * ngz, ((ngs3 + 1) // 2) * ngz)
+
+    # Loop over k-points
+    for kpt_idx in range(num_kpts):
+        kpt = kpts[kpt_idx]
+
+        # Create meshgrid for all supercell points
+        nxx_grid, nyy_grid, nzz_grid = np.meshgrid(
+            nxx_range, nyy_range, nzz_range, indexing="ij"
+        )
+
+        # Flatten for easier manipulation
+        nxx_flat = nxx_grid.ravel()
+        nyy_flat = nyy_grid.ravel()
+        nzz_flat = nzz_grid.ravel()
+
+        # Map to reference unit cell indices (1-based like C++)
+        nx = nxx_flat % ngx
+        ny = nyy_flat % ngy
+        nz = nzz_flat % ngz
+        nx = np.where(nx < 1, nx + ngx, nx)
+        ny = np.where(ny < 1, ny + ngy, ny)
+        nz = np.where(nz < 1, nz + ngz, nz)
+
+        # Calculate linear index in reference grid (0-based for Python)
+        npoint = (nx - 1) * ngy * ngz + (ny - 1) * ngz + (nz - 1)
+
+        # Calculate phase factors: exp(2*pi*i * k·r)
+        scalfac = (
+            kpt[0] * (nxx_flat - 1) / ngx
+            + kpt[1] * (nyy_flat - 1) / ngy
+            + kpt[2] * (nzz_flat - 1) / ngz
+        )
+        phase = np.exp(2j * np.pi * scalfac)
+
+        # Add contribution from this k-point
+        # wann_func[supercell_idx, :] += phase * u_mo[kpt_idx, reference_idx, :]
+        for band_idx in range(num_band):
+            wann_func[:, band_idx] += phase * u_mo[kpt_idx, npoint, band_idx]
+
+    return wann_func
 
 
 def angle(v1, v2):
@@ -441,7 +511,7 @@ def g_r(grids_coor, site, l, mr, r, zona, x_axis=[1, 0, 0], z_axis=[0, 0, 1], un
     phi = np.empty_like(r_norm)
     larger_idx = r_vec[:, 0] > 1e-8
     smaller_idx = r_vec[:, 0] < -1e-8
-    neither_idx = not (larger_idx + smaller_idx)
+    neither_idx = np.logical_not(np.logical_or(larger_idx, smaller_idx))
     phi[larger_idx] = np.arctan(r_vec[larger_idx, 1] / r_vec[larger_idx, 0])
     phi[smaller_idx] = np.arctan(r_vec[smaller_idx, 1] / r_vec[smaller_idx, 0]) + np.pi
     phi[neither_idx] = np.sign(r_vec[neither_idx, 1]) * 0.5 * np.pi
@@ -631,6 +701,9 @@ class W90:
         gamma=False,
         spinors=False,
         spin="up",
+        num_iter=100,
+        dis_num_iter=200,
+        write_hr=False,
         other_keywords=None,
     ):
         if isinstance(kmf, str):
@@ -656,17 +729,15 @@ class W90:
         self.atoms_cart_loc = np.asarray(
             [(np.asarray(atom[1]) * param.BOHR).tolist() for atom in self.cell._atom]
         )
-        self.gamma_only, self.spinors = (0, 0)
-        if gamma:
-            self.gamma_only = 1
-        if spinors:
-            self.spinors = 1
+        self.gamma_only = gamma
+        self.spinors = spinors
 
         # Wannier90_setup outputs
         self.num_bands_loc = None
         self.num_wann_loc = None
         self.nntot_loc = None
-        self.nn_list = None
+        self.nnlist = None
+        self.nncell = None
         self.proj_site = None
         self.proj_l = None
         self.proj_m = None
@@ -677,6 +748,10 @@ class W90:
         self.exclude_bands = None
         self.proj_s = None
         self.proj_s_qaxis = None
+
+        self.ftn_output = wan90.w90_library.w90_get_fortran_stdout()
+        self.ftn_error = wan90.w90_library.w90_get_fortran_stderr()
+        self.data = wan90.w90_library.lib_common_type()
 
         # Input for Wannier90_run
         self.band_included_list = None
@@ -695,6 +770,10 @@ class W90:
         # Others
         self.use_bloch_phases = False
         self.spin = spin
+        self.num_iter = num_iter
+        self.write_hr = write_hr
+        self.dis_num_iter = dis_num_iter
+
         self.mo_energy_kpts = []
         self.mo_coeff_kpts = []
         if np.asarray(kmf.mo_energy_kpts).ndim == 3:
@@ -773,9 +852,14 @@ class W90:
             self.A_matrix_loc = self.read_A_mat(external_AME + ".amn")
             self.eigenvalues_loc = self.read_epsilon_mat(external_AME + ".eig")
         else:
-            self.M_matrix_loc = self.get_M_mat()
+            self.M_matrix_loc = self.compute_M_matrix()
+            self.set_m_matrix()
             self.A_matrix_loc = self.get_A_mat()
+            self.set_a_matrix()
             self.eigenvalues_loc = self.get_epsilon_mat()
+            self.set_eigenvalues(self.eigenvalues_loc)
+        self.set_u_matrix()
+        self.disentangle_or_project()
         self.run()
 
     def make_win(self):
@@ -841,34 +925,36 @@ class W90:
         win_file.write("End Kpoints\n")
         win_file.close()
 
-    def get_M_mat(self):
-        """
-        Construct the ovelap matrix: M_{m,n}^{(\mathbf{k,b})}
-        Equation (25) in MV, Phys. Rev. B 56, 12847
-        """
+    def compute_M_matrix(self):
+        # M_{mn}^{(k,b)} = <u_{m,k} | u_{n,k+b}>
+        from pyscf import lib
 
-        M_matrix_loc = np.empty(
-            [self.num_kpts_loc, self.nntot_loc, self.num_bands_loc, self.num_bands_loc],
-            dtype=np.complex128,
-        )
+        nk = self.data.num_kpts
+        nb = self.data.kmesh_info.nntot
+        nband = len(self.band_included_list)
+        m_matrix = np.zeros((nband, nband, nk, nb), dtype=np.cdouble, order="F")
+        kpts_abs = self.cell.get_abs_kpts(self.kmf.kpts)
 
-        for k_id in range(self.num_kpts_loc):
-            for nn in range(self.nntot_loc):
-                k1 = self.cell.get_abs_kpts(self.kpt_latt_loc[k_id])
-                k_id2 = self.nn_list[nn, k_id, 0] - 1
-                k2_ = self.kpt_latt_loc[k_id2]
-                k2_scaled = k2_ + self.nn_list[nn, k_id, 1:4]
-                k2 = self.cell.get_abs_kpts(k2_scaled)
+        for k in range(nk):
+            k1 = kpts_abs[k]
+            Cm = self.kmf.mo_coeff_kpts[k][:, self.band_included_list]
+
+            for nn in range(nb):
+                k2_index = (
+                    self.nnlist[k, nn] - 1
+                )  # convert from Fortran to Python index
+                bvec = self.nncell[:, k, nn]  # lattice translation in reciprocal units
+                k2_scaled = self.kmf.kpts[k2_index] + bvec
+                k2 = self.cell.get_abs_kpts([k2_scaled])
+                Cn = self.kmf.mo_coeff_kpts[k2_index][:, self.band_included_list]
+
                 s_AO = df.ft_ao.ft_aopair(
                     self.cell, -k2 + k1, kpti_kptj=[k2, k1], q=np.zeros(3)
                 )[0]
-                Cm = self.mo_coeff_kpts[k_id][:, self.band_included_list]
-                Cn = self.mo_coeff_kpts[k_id2][:, self.band_included_list]
-                M_matrix_loc[k_id, nn, :, :] = lib.einsum(
-                    "nu,vm,uv->nm", Cn.T.conj(), Cm, s_AO
-                ).conj()
+                Mmn = lib.einsum("nu,vm,uv->nm", Cn.T.conj(), Cm, s_AO).conj()
 
-        return M_matrix_loc
+                m_matrix[:, :, k, nn] = Mmn
+        return m_matrix
 
     def read_M_mat(self, filename=None):
         """
@@ -945,7 +1031,8 @@ class W90:
                         "v,vu,um->m", s_aoL0_g, s_kpt, mo_included, optimize=True
                     ).conj()
 
-        return A_matrix_loc
+        A_matrix = np.transpose(A_matrix_loc, axes=(2, 1, 0))
+        return A_matrix
 
     def read_A_mat(self, filename=None):
         """
@@ -995,63 +1082,117 @@ class W90:
             nkpts = int(temp[:, 1].max())
             eigenvals = temp[:, 2].reshape(nkpts, nbands)
 
-        return eigenvals
+        return eigenvals.T
 
     def setup(self):
         """
         Execute the Wannier90_setup
         """
-
-        real_lattice_loc = self.real_lattice_loc.T.flatten()
-        recip_lattice_loc = self.recip_lattice_loc.T.flatten()
-        kpt_latt_loc = self.kpt_latt_loc.flatten()
-        atoms_cart_loc = self.atoms_cart_loc.flatten()
-
-        (
-            bands_wann_nntot,
-            nn_list,
-            proj_site,
-            proj_l,
-            proj_m,
-            proj_radial,
-            proj_z,
-            proj_x,
-            proj_zona,
-            exclude_bands,
-            proj_s,
-            proj_s_qaxis,
-        ) = libwannier90.setup(
-            self.mp_grid_loc,
-            self.num_kpts_loc,
-            real_lattice_loc,
-            recip_lattice_loc,
-            kpt_latt_loc,
-            self.num_bands_tot,
-            self.num_atoms_loc,
-            self.atom_atomic_loc,
-            atoms_cart_loc,
-            self.gamma_only,
-            self.spinors,
+        status = wan90.w90_library_extra.input_reader_special(
+            self.data, "wannier90", self.ftn_output, self.ftn_error
         )
 
-        # Convert outputs to the correct data type
-        self.num_bands_loc, self.num_wann_loc, self.nntot_loc = np.int32(
-            bands_wann_nntot
-        )
-        self.nn_list = np.int32(nn_list)
-        self.proj_site = proj_site
-        self.proj_l = np.int32(proj_l)
-        self.proj_m = np.int32(proj_m)
-        self.proj_radial = np.int32(proj_radial)
-        self.proj_z = proj_z
-        self.proj_x = proj_x
-        self.proj_zona = proj_zona
-        self.exclude_bands = np.int32(exclude_bands)
+        self.data.gamma_only = self.gamma_only
+        self.data.spinors = self.spinors
+        self.data.use_bloch_phases = self.use_bloch_phases
+        self.data.wann_control.num_iter = self.num_iter
+        self.data.dis_control.num_iter = self.dis_num_iter
+        self.data.output_file.write_hr = self.write_hr
+
+        if not self.data.kmesh_info.explicit_nnkpts:
+            status = wan90.w90_library.w90_create_kmesh(  # noqa: F841
+                self.data, self.ftn_output, self.ftn_error
+            )
+
+        # Assign local variables to retain the logic
+        self.num_kpts_loc = self.data.num_kpts
+        self.nntot_loc = self.data.kmesh_info.nntot
+        self.nnlist = self.data.kmesh_info.nnlist
+        self.nncell = self.data.kmesh_info.nncell
+
+        try:
+            exclude_bands = list(self.data.exclude_bands)
+        except Exception:
+            exclude_bands = []
+
         self.band_included_list = [
-            i for i in range(self.num_bands_tot) if (i + 1) not in self.exclude_bands
+            i - 1 for i in range(1, self.data.num_bands + 1) if i not in exclude_bands
         ]
-        self.proj_s = np.int32(proj_s)
-        self.proj_s_qaxis = proj_s_qaxis
+        self.num_wann_loc = self.data.num_wann
+        # Update num_bands if needed
+        self.data.num_bands = (
+            len(self.band_included_list)
+            if self.band_included_list
+            else self.data.num_bands
+        )
+        self.num_bands_loc = self.data.num_bands
+        #
+        get_attributes = operator.attrgetter(
+            "site", "l", "m", "radial", "z", "x", "zona", "s", "s_qaxis"
+        )
+        list_of_tuples = [get_attributes(i) for i in self.data.proj_input]
+        (
+            self.proj_site,
+            self.proj_l,
+            self.proj_m,
+            self.proj_radial,
+            self.proj_z,
+            self.proj_x,
+            self.proj_zona,
+            self.proj_s,
+            self.proj_s_qaxis,
+        ) = zip(*list_of_tuples)
+
+    def set_m_matrix(self):
+        # set M matrix
+        wan90.w90_library.w90_set_m_local(
+            self.data, np.asfortranarray(self.M_matrix_loc)
+        )
+
+    def set_a_matrix(self):
+        wan90.w90_library.w90_set_u_opt(self.data, np.asfortranarray(self.A_matrix_loc))
+
+    def set_u_matrix(self):
+        """
+        Set the initial U matrix
+        """
+        u_matrix = np.zeros(
+            (self.data.num_wann, self.data.num_wann, self.data.num_kpts),
+            dtype=np.cdouble,
+            order="F",
+        )
+        wan90.w90_library.w90_set_u_matrix(self.data, u_matrix)
+
+    def set_eigenvalues(self, eigenvalues_loc):
+        """
+        Set the eigenvalues
+        """
+        wan90.w90_library.w90_set_eigval(
+            self.data, np.asfortranarray(eigenvalues_loc.T)
+        )
+
+    def project_overlap(self):
+        status = wan90.w90_library.w90_project_overlap(  # noqa: F841
+            self.data, self.ftn_output, self.ftn_error
+        )
+
+    def disentangle(self):
+        status = wan90.w90_library.w90_disentangle(  # noqa: F841
+            self.data, self.ftn_output, self.ftn_error
+        )
+
+    def wannierise(self):
+        status = wan90.w90_library.w90_wannierise(  # noqa: F841
+            self.data, self.ftn_output, self.ftn_error
+        )
+
+    def disentangle_or_project(self):
+        if self.data.num_wann == self.data.num_bands:
+            print("Skipping disentanglement as num_wann == num_bands")
+            self.project_overlap()
+        else:
+            print("Performing disentanglement as num_wann < num_bands")
+            self.disentangle()
 
     def run(self):
         """
@@ -1063,42 +1204,41 @@ class W90:
         assert isinstance(self.A_matrix_loc, np.ndarray)
         assert isinstance(self.eigenvalues_loc, np.ndarray)
 
-        real_lattice_loc = self.real_lattice_loc.T.flatten()
-        recip_lattice_loc = self.recip_lattice_loc.T.flatten()
-        kpt_latt_loc = self.kpt_latt_loc.flatten()
-        atoms_cart_loc = self.atoms_cart_loc.flatten()
-        M_matrix_loc = self.M_matrix_loc.flatten()
-        A_matrix_loc = self.A_matrix_loc.flatten()
-        eigenvalues_loc = self.eigenvalues_loc.flatten()
-
-        U_matrix, U_matrix_opt, lwindow, wann_centres, wann_spreads, spread = (
-            libwannier90.run(
-                self.mp_grid_loc,
-                self.num_kpts_loc,
-                real_lattice_loc,
-                recip_lattice_loc,
-                kpt_latt_loc,
-                self.num_bands_loc,
-                self.num_wann_loc,
-                self.nntot_loc,
-                self.num_atoms_loc,
-                self.atom_atomic_loc,
-                atoms_cart_loc,
-                self.gamma_only,
-                M_matrix_loc,
-                A_matrix_loc,
-                eigenvalues_loc,
-            )
-        )
+        # Wannierise
+        print("Performing Wannierisation")
+        self.wannierise()
+        print("Wannierisation finished")
 
         # Convert outputs to the correct data typ
-        self.U_matrix = U_matrix
-        self.U_matrix_opt = U_matrix_opt
-        lwindow = np.int32(np.abs(lwindow.real))
-        self.lwindow = lwindow == 1
-        self.wann_centres = wann_centres.real
-        self.wann_spreads = wann_spreads.real
-        self.spread = spread.real
+        self.U_matrix = self.data.u_matrix
+        print("U_matrix shape", self.U_matrix.shape)
+        print("U_matrix")
+        print(self.U_matrix)
+        self.U_matrix_opt = self.data.u_matrix_opt
+        print("U matrix opt shape", self.U_matrix_opt.shape)
+        print("U matrix opt", self.U_matrix_opt)
+
+        wannier_centres = np.zeros((self.data.num_wann, 3), dtype=np.float64, order="F")
+        status = wan90.w90_library.w90_get_centres(self.data, wannier_centres)  # noqa: F841
+        self.wann_centres = wannier_centres
+        print("Wannier centres")
+        print(self.wann_centres)
+
+        wannier_spreads = np.zeros(self.data.num_wann, dtype=np.float64, order="F")
+        status = wan90.w90_library.w90_get_spreads(self.data, wannier_spreads)  # noqa: F841
+        self.wann_spreads = wannier_spreads
+
+        self.spread = np.sum(self.wann_spreads)
+
+        # Update lwindow to True
+        try:
+            lwindow = self.data.dis_manifold.lwindow
+        except Exception:
+            lwindow = []
+        self.lwindow = lwindow
+        # print("Lwindow shape", self.lwindow.shape)
+        # print("Lwindow")
+        print(self.lwindow)
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
     R_wz_sc = R_wz_sc
@@ -1296,7 +1436,7 @@ class W90:
         if self.A_matrix_loc is None:
             self.make_win()
             self.setup()
-            self.M_matrix_loc = self.get_M_mat()
+            self.M_matrix_loc = self.compute_M_matrix()
             self.A_matrix_loc = self.get_A_mat()
             self.eigenvalues_loc = self.get_epsilon_mat()
             self.export_unk(self, grid=grid)
@@ -1311,8 +1451,8 @@ class W90:
             for k_id in range(self.num_kpts_loc):
                 for nn in range(self.nntot_loc):
                     k_id1 = k_id + 1
-                    k_id2 = self.nn_list[nn, k_id, 0]
-                    nnn, nnm, nnl = self.nn_list[nn, k_id, 1:4]
+                    k_id2 = self.nnlist[nn, k_id, 0]
+                    nnn, nnm, nnl = self.nnlist[nn, k_id, 1:4]
                     f.write(
                         "    %d  %d    %d  %d  %d\n" % (k_id1, k_id2, nnn, nnm, nnl)
                     )
@@ -1361,29 +1501,41 @@ class W90:
         """
 
         grids_coor, weights = periodic_grid(
-            self.cell, grid, supercell=[1, 1, 1], order="C"
+            self.cell,
+            grid,
+            supercell=supercell,
+            order="C",  # use supercell
         )
         kpts = self.cell.get_abs_kpts(self.kpt_latt_loc)
-
-        # ao_kpts = np.asarray(
-        #    [numint.eval_ao(self.cell, grids_coor, kpt=kpt) for kpt in kpts]
-        # )
-
         u_mo = []
+
+        # Update order of U matrices
+        u_matrix_opt = np.transpose(self.U_matrix_opt, axes=(2, 1, 0))
+        u_matrix = np.transpose(self.U_matrix, axes=(2, 1, 0))
+
+        # Update lwindow if not disentanglement has been performed
+        if self.data.num_wann == self.data.num_bands:
+            lwindow = np.ones((self.num_kpts_loc, self.num_wann_loc), dtype=bool)
+        else:
+            lwindow = self.lwindow
+            lwindow = np.transpose(lwindow, axes=(1, 0))
+        print("Lwindow:")
+        print(lwindow)
+
         for k_id in range(self.num_kpts_loc):
             mo_included = self.mo_coeff_kpts[k_id][:, self.band_included_list]
-            mo_in_window = self.lwindow[k_id]
+            mo_in_window = lwindow[k_id]
             C_opt = mo_included[:, mo_in_window].dot(
-                self.U_matrix_opt[k_id][:, mo_in_window].T
+                u_matrix_opt[k_id][:, mo_in_window].T
             )
-            C_tildle = C_opt.dot(self.U_matrix[k_id].T)
+            C_tildle = C_opt.dot(u_matrix[k_id].T)
             kpt = kpts[k_id]
             ao = numint.eval_ao(self.cell, grids_coor, kpt=kpt)
             u_ao = lib.einsum("x,xi->xi", np.exp(-1j * np.dot(grids_coor, kpt)), ao)
             u_mo.append(lib.einsum("xi,in->xn", u_ao, C_tildle))
 
         u_mo = np.asarray(u_mo)
-        WF0 = libwannier90.get_WF0s(
+        WF0 = get_WF0s(
             self.kpt_latt_loc.shape[0], self.kpt_latt_loc, supercell, grid, u_mo
         )
 
@@ -1451,6 +1603,10 @@ class W90:
         real_lattice_loc = (
             (grid * supercell - 1) / grid * self.cell.lattice_vectors() * param.BOHR
         )
+
+        print("Origin for plotting:", origin)
+        print("Lattice vectors for plotting:")
+        print(real_lattice_loc)
         nx, ny, nz = grid * supercell
         WF0 = self.get_wannier(supercell=supercell, grid=grid)
 
