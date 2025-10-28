@@ -1134,6 +1134,8 @@ class W90:
             self.proj_s_qaxis,
         ) = zip(*list_of_tuples)
 
+        wan90.w90_library.w90_print_info(self.data, self.ftn_output, self.ftn_error)
+
     def set_m_matrix(self):
         # set M matrix
         wan90.w90_library.w90_set_m_local(
@@ -1231,7 +1233,7 @@ class W90:
         print("Lwindow")
         print(self.lwindow)
 
-        # status = wan90.w90_library.w90_checkpoint(self.data, "postwann", self.ftn_output, self.ftn_error)
+        wan90.w90_library.w90_plot(self.data, self.ftn_output, self.ftn_error)
         wan90.w90_library_extra.print_times(self.data, self.ftn_output)
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
