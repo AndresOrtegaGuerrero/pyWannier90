@@ -853,6 +853,7 @@ class W90:
             self.eigenvalues_loc = self.get_epsilon_mat()
             self.set_eigenvalues(self.eigenvalues_loc)
         self.set_u_matrix()
+        self.export_unk_file()
         self.disentangle_or_project()
         self.run()
 
@@ -1396,6 +1397,18 @@ class W90:
         )
 
         return mo_coeff_Rs.imag.max() < threshold
+
+    def export_unk_file(self):
+        """
+        Export the periodic part of BF in a real space grid for plotting with wannier90
+        The grid size is based on the lattice parameters
+        """
+        grid_size = (
+            np.ceil(np.linalg.norm(self.real_lattice_loc, axis=1) / 0.12)
+            .astype(int)
+            .tolist()
+        )
+        self.export_unk(grid=grid_size)
 
     def export_unk(self, grid=[50, 50, 50]):
         """
