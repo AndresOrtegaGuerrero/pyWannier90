@@ -35,6 +35,7 @@ ekpt = kmf.run()
 
 num_wann = 4
 keywords = """
+num_iter       : 20
 exclude_bands : 5-14
 begin projections
 C:sp3
@@ -42,7 +43,7 @@ end projections
 """
 
 w90 = pywannier90.W90(
-    kmf, cell, nk, num_wann, gamma=True, spin="up", num_iter=20, other_keywords=keywords
+    kmf, cell, nk, num_wann, gamma=True, spin="up", other_keywords=keywords
 )
 w90.kernel()
 w90.plot_wf(grid=[40, 40, 40], supercell=nk)

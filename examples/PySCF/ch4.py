@@ -34,6 +34,7 @@ ekpt = kmf.run()
 
 num_wann = 4
 keywords = """
+num_iter = 20
 begin projections
 C:sp3
 end projections
