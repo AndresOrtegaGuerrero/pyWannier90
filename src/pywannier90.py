@@ -701,9 +701,6 @@ class W90:
         gamma=False,
         spinors=False,
         spin="up",
-        num_iter=100,
-        dis_num_iter=200,
-        write_hr=False,
         other_keywords=None,
     ):
         if isinstance(kmf, str):
@@ -770,9 +767,6 @@ class W90:
         # Others
         self.use_bloch_phases = False
         self.spin = spin
-        self.num_iter = num_iter
-        self.write_hr = write_hr
-        self.dis_num_iter = dis_num_iter
 
         self.mo_energy_kpts = []
         self.mo_coeff_kpts = []
@@ -937,7 +931,6 @@ class W90:
 
         for k in range(nk):
             k1 = kpts_abs[k]
-            # Cm = self.kmf.mo_coeff_kpts[k][:, self.band_included_list]
             Cm = self.mo_coeff_kpts[k][:, self.band_included_list]
 
             for nn in range(nb):
@@ -947,7 +940,6 @@ class W90:
                 bvec = self.nncell[:, k, nn]  # lattice translation in reciprocal units
                 k2_scaled = self.kmf.kpts[k2_index] + bvec
                 k2 = self.cell.get_abs_kpts([k2_scaled])
-                # Cn = self.kmf.mo_coeff_kpts[k2_index][:, self.band_included_list]
                 Cn = self.mo_coeff_kpts[k2_index][:, self.band_included_list]
                 s_AO = df.ft_ao.ft_aopair(
                     self.cell, -k2 + k1, kpti_kptj=[k2, k1], q=np.zeros(3)
@@ -1092,13 +1084,11 @@ class W90:
         status = wan90.w90_library_extra.input_reader_special(
             self.data, "wannier90", self.ftn_output, self.ftn_error
         )
+        wan90.w90_library.w90_input_reader(self.data, self.ftn_output, self.ftn_error)
 
         self.data.gamma_only = self.gamma_only
         self.data.spinors = self.spinors
         self.data.use_bloch_phases = self.use_bloch_phases
-        self.data.wann_control.num_iter = self.num_iter
-        self.data.dis_control.num_iter = self.dis_num_iter
-        self.data.output_file.write_hr = self.write_hr
 
         if not self.data.kmesh_info.explicit_nnkpts:
             status = wan90.w90_library.w90_create_kmesh(  # noqa: F841
@@ -1240,6 +1230,9 @@ class W90:
         # print("Lwindow shape", self.lwindow.shape)
         print("Lwindow")
         print(self.lwindow)
+
+        # status = wan90.w90_library.w90_checkpoint(self.data, "postwann", self.ftn_output, self.ftn_error)
+        wan90.w90_library_extra.print_times(self.data, self.ftn_output)
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
     R_wz_sc = R_wz_sc
