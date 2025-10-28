@@ -40,8 +40,6 @@ C:sp3
 end projections
 """
 
-w90 = pywannier90.W90(
-    kmf, cell, nk, num_wann, gamma=True, write_hr=True, other_keywords=keywords
-)
+w90 = pywannier90.W90(kmf, cell, nk, num_wann, gamma=True, other_keywords=keywords)
 w90.kernel()
 w90.plot_wf(grid=[40, 40, 40], supercell=nk)
