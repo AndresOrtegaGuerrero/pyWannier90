@@ -994,39 +994,56 @@ class W90:
         )
 
         if self.use_bloch_phases:
-            Amn = np.zeros([self.num_wann_loc, self.num_bands_loc])
-            np.fill_diagonal(Amn, 1)
-            A_matrix_loc[:, :, :] = Amn
-        else:
-            from pyscf.dft import numint, gen_grid
+            Amn = np.eye(self.num_wann_loc, self.num_bands_loc)
+            A_matrix_loc[:] = Amn
+            return np.transpose(A_matrix_loc, axes=(2, 1, 0))
 
-            grids = gen_grid.Grids(self.cell).build()
-            coords = grids.coords
-            weights = grids.weights
-            for ith_wann in range(self.num_wann_loc):
-                frac_site = self.proj_site[ith_wann]
-                abs_site = frac_site.dot(self.real_lattice_loc) / param.BOHR
-                l = self.proj_l[ith_wann]  # noqa: E741
-                mr = self.proj_m[ith_wann]
-                r = self.proj_radial[ith_wann]
-                zona = self.proj_zona[ith_wann]
-                x_axis = self.proj_x[ith_wann]
-                z_axis = self.proj_z[ith_wann]
-                gr = g_r(coords, abs_site, l, mr, r, zona, x_axis, z_axis, unit="B")
-                ao_L0 = numint.eval_ao(self.cell, coords)
-                s_aoL0_g = lib.einsum("i,i,iv->v", weights, gr, ao_L0)
-                for k_id in range(self.num_kpts_loc):
-                    kpt = self.cell.get_abs_kpts(self.kpt_latt_loc[k_id])
-                    mo_included = self.mo_coeff_kpts[k_id][:, self.band_included_list]
-                    s_kpt = self.cell.pbc_intor(
-                        "int1e_ovlp", hermi=1, kpts=kpt, pbcopt=lib.c_null_ptr()
-                    )
-                    A_matrix_loc[k_id, ith_wann, :] = lib.einsum(
-                        "v,vu,um->m", s_aoL0_g, s_kpt, mo_included, optimize=True
-                    ).conj()
+        from pyscf.dft import numint, gen_grid
 
-        A_matrix = np.transpose(A_matrix_loc, axes=(2, 1, 0))
-        return A_matrix
+        grids = gen_grid.Grids(self.cell).build()
+        coords, weights = grids.coords, grids.weights
+
+        ao_L0 = numint.eval_ao(self.cell, coords)
+        kpts_abs = self.cell.get_abs_kpts(self.kpt_latt_loc)
+        s_kpts = [
+            self.cell.pbc_intor(
+                "int1e_ovlp", hermi=1, kpts=kpt, pbcopt=lib.c_null_ptr()
+            )
+            for kpt in kpts_abs
+        ]
+        mo_included_kpts = [mo[:, self.band_included_list] for mo in self.mo_coeff_kpts]
+
+        for ith_wann in range(self.num_wann_loc):
+            frac_site = self.proj_site[ith_wann]
+            abs_site = frac_site.dot(self.real_lattice_loc) / param.BOHR
+
+            proj_l, proj_m, proj_radial, proj_zona, proj_x, proj_z = (
+                self.proj_l[ith_wann],
+                self.proj_m[ith_wann],
+                self.proj_radial[ith_wann],
+                self.proj_zona[ith_wann],
+                self.proj_x[ith_wann],
+                self.proj_z[ith_wann],
+            )
+            gr = g_r(
+                coords,
+                abs_site,
+                proj_l,
+                proj_m,
+                proj_radial,
+                proj_zona,
+                proj_x,
+                proj_z,
+                unit="B",
+            )
+            s_aoL0_g = lib.einsum("i,i,iv->v", weights, gr, ao_L0)
+
+            for k_id, (s_kpt, mo_included) in enumerate(zip(s_kpts, mo_included_kpts)):
+                A_matrix_loc[k_id, ith_wann, :] = lib.einsum(
+                    "v,vu,um->m", s_aoL0_g, s_kpt, mo_included, optimize=True
+                ).conj()
+
+        return np.transpose(A_matrix_loc, axes=(2, 1, 0))
 
     def read_A_mat(self, filename=None):
         """
@@ -1415,9 +1432,9 @@ class W90:
         Export the periodic part of BF in a real space grid for plotting with wannier90
         """
 
-        grids_coor, weights = periodic_grid(self.cell, grid, order="F")
+        grids_coor, _ = periodic_grid(self.cell, grid, order="F")
 
-        for k_id in range(self.num_kpts_loc):
+        for k_id in range(np.asarray(self.kmf.mo_energy_kpts[0]).ndim):
             spin = ".1"
             if self.spin == "down" or self.spin == "mix":
                 spin = ".2"
