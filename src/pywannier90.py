@@ -90,22 +90,17 @@ def get_WF0s(num_kpts, kpts, supercell, grid, u_mo):
     # Initialize output
     wann_func = np.zeros((num_pts_total, num_band), dtype=np.complex128)
 
-    # Create grid indices for supercell
-    # Following C++ convention: range from -(ngs/2)*ng to ((ngs+1)/2)*ng
     nxx_range = np.arange(-(ngs1 // 2) * ngx, ((ngs1 + 1) // 2) * ngx)
     nyy_range = np.arange(-(ngs2 // 2) * ngy, ((ngs2 + 1) // 2) * ngy)
     nzz_range = np.arange(-(ngs3 // 2) * ngz, ((ngs3 + 1) // 2) * ngz)
 
-    # Loop over k-points
     for kpt_idx in range(num_kpts):
         kpt = kpts[kpt_idx]
 
-        # Create meshgrid for all supercell points
         nxx_grid, nyy_grid, nzz_grid = np.meshgrid(
             nxx_range, nyy_range, nzz_range, indexing="ij"
         )
 
-        # Flatten for easier manipulation
         nxx_flat = nxx_grid.ravel()
         nyy_flat = nyy_grid.ravel()
         nzz_flat = nzz_grid.ravel()
@@ -118,10 +113,10 @@ def get_WF0s(num_kpts, kpts, supercell, grid, u_mo):
         ny = np.where(ny < 1, ny + ngy, ny)
         nz = np.where(nz < 1, nz + ngz, nz)
 
-        # Calculate linear index in reference grid (0-based for Python)
+        # 0-based for Python
         npoint = (nx - 1) * ngy * ngz + (ny - 1) * ngz + (nz - 1)
 
-        # Calculate phase factors: exp(2*pi*i * k·r)
+        # Calculate phase factors
         scalfac = (
             kpt[0] * (nxx_flat - 1) / ngx
             + kpt[1] * (nyy_flat - 1) / ngy
@@ -839,20 +834,31 @@ class W90:
         """
         Main kernel for pyWannier90
         """
+        print("Starting Wannier90_setup...", flush=True)
         self.make_win()
         self.setup()
+        print("Finished Wannier90_setup.", flush=True)
         if external_AME is not None:
             self.M_matrix_loc = self.read_M_mat(external_AME + ".mmn")
             self.A_matrix_loc = self.read_A_mat(external_AME + ".amn")
             self.eigenvalues_loc = self.read_epsilon_mat(external_AME + ".eig")
         else:
+            print("Computing M matrix...", flush=True)
             self.M_matrix_loc = self.compute_M_matrix()
             self.set_m_matrix()
+            print("Finished computing M matrix.", flush=True)
+            print("Computing A matrix and eigenvalues...", flush=True)
             self.A_matrix_loc = self.get_A_mat()
             self.set_a_matrix()
+            print("Finished computing A matrix.", flush=True)
+            print("Setting eigenvalus...", flush=True)
             self.eigenvalues_loc = self.get_epsilon_mat()
             self.set_eigenvalues(self.eigenvalues_loc)
+            print("Finished setting eigenvalues.", flush=True)
+
+        print("Initializing u_matrix...", flush=True)
         self.set_u_matrix()
+        print("Exporting unk file...", flush=True)
         self.export_unk_file()
         self.disentangle_or_project()
         self.run()
@@ -1199,10 +1205,10 @@ class W90:
 
     def disentangle_or_project(self):
         if self.data.num_wann == self.data.num_bands:
-            print("Skipping disentanglement as num_wann == num_bands")
+            print("Skipping disentanglement as num_wann == num_bands", flush=True)
             self.project_overlap()
         else:
-            print("Performing disentanglement as num_wann < num_bands")
+            print("Performing disentanglement as num_wann < num_bands", flush=True)
             self.disentangle()
 
     def run(self):
@@ -1216,27 +1222,22 @@ class W90:
         assert isinstance(self.eigenvalues_loc, np.ndarray)
 
         # Wannierise
-        print("Performing Wannierisation")
+        print("Performing Wannierisation", flush=True)
         self.wannierise()
-        print("Wannierisation finished")
+        print("Wannierisation finished", flush=True)
 
-        # Convert outputs to the correct data typ
+        # Convert outputs to the correct data type
+
         self.U_matrix = self.data.u_matrix
-        print("U_matrix shape", self.U_matrix.shape)
-        print("U_matrix")
         print(self.U_matrix)
         self.U_matrix_opt = self.data.u_matrix_opt
-        print("U matrix opt shape", self.U_matrix_opt.shape)
-        print("U matrix opt", self.U_matrix_opt)
 
         wannier_centres = np.zeros((self.data.num_wann, 3), dtype=np.float64, order="F")
-        status = wan90.w90_library.w90_get_centres(self.data, wannier_centres)  # noqa: F841
+        wan90.w90_library.w90_get_centres(self.data, wannier_centres)
         self.wann_centres = wannier_centres
-        print("Wannier centres")
-        print(self.wann_centres)
 
         wannier_spreads = np.zeros(self.data.num_wann, dtype=np.float64, order="F")
-        status = wan90.w90_library.w90_get_spreads(self.data, wannier_spreads)  # noqa: F841
+        wan90.w90_library.w90_get_spreads(self.data, wannier_spreads)
         self.wann_spreads = wannier_spreads
 
         self.spread = np.sum(self.wann_spreads)
@@ -1247,9 +1248,6 @@ class W90:
         except Exception:
             lwindow = []
         self.lwindow = lwindow
-        # print("Lwindow shape", self.lwindow.shape)
-        print("Lwindow")
-        print(self.lwindow)
 
         wan90.w90_library.w90_plot(self.data, self.ftn_output, self.ftn_error)
         wan90.w90_library_extra.print_times(self.data, self.ftn_output)
