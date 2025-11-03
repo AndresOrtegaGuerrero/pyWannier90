@@ -862,6 +862,7 @@ class W90:
         self.export_unk_file()
         self.disentangle_or_project()
         self.run()
+        self.set_outputs()
 
     def make_win(self):
         """
@@ -933,7 +934,7 @@ class W90:
         nk = self.data.num_kpts
         nb = self.data.kmesh_info.nntot
         nband = len(self.band_included_list)
-        m_matrix = np.zeros((nband, nband, nk, nb), dtype=np.cdouble, order="F")
+        m_matrix = np.zeros((nband, nband, nb, nk), dtype=np.cdouble, order="F")
         kpts_abs = self.cell.get_abs_kpts(self.kmf.kpts)
 
         for k in range(nk):
@@ -953,7 +954,7 @@ class W90:
                 )[0]
                 Mmn = lib.einsum("nu,vm,uv->nm", Cn.T.conj(), Cm, s_AO).conj()
 
-                m_matrix[:, :, k, nn] = Mmn
+                m_matrix[:, :, nn, k] = Mmn
         return m_matrix
 
     def read_M_mat(self, filename=None):
@@ -994,9 +995,9 @@ class W90:
         Equation (62) in MV, Phys. Rev. B 56, 12847 or equation (22) in SMV, Phys. Rev. B 65, 035109
         """
 
-        A_matrix_loc = np.empty(
+        A_matrix_loc = np.zeros(
             [self.num_kpts_loc, self.num_wann_loc, self.num_bands_loc],
-            dtype=np.complex128,
+            dtype=np.cdouble,
         )
 
         if self.use_bloch_phases:
@@ -1110,10 +1111,6 @@ class W90:
         )
         wan90.w90_library.w90_input_reader(self.data, self.ftn_output, self.ftn_error)
 
-        self.data.gamma_only = self.gamma_only
-        self.data.spinors = self.spinors
-        self.data.use_bloch_phases = self.use_bloch_phases
-
         if not self.data.kmesh_info.explicit_nnkpts:
             status = wan90.w90_library.w90_create_kmesh(  # noqa: F841
                 self.data, self.ftn_output, self.ftn_error
@@ -1134,14 +1131,20 @@ class W90:
             i - 1 for i in range(1, self.data.num_bands + 1) if i not in exclude_bands
         ]
         self.num_wann_loc = self.data.num_wann
-        # Update num_bands if needed
+
         self.data.num_bands = (
             len(self.band_included_list)
             if self.band_included_list
             else self.data.num_bands
         )
+        print("Updated num_bands:", self.data.num_bands)
         self.num_bands_loc = self.data.num_bands
-        #
+
+        kpts = np.zeros(self.data.num_kpts, dtype=np.int32)
+        wan90.w90_library_extra.set_kpoint_distribution(
+            self.data, kpts, self.ftn_output, self.ftn_error
+        )
+
         get_attributes = operator.attrgetter(
             "site", "l", "m", "radial", "z", "x", "zona", "s", "s_qaxis"
         )
@@ -1161,12 +1164,17 @@ class W90:
         wan90.w90_library.w90_print_info(self.data, self.ftn_output, self.ftn_error)
 
     def set_m_matrix(self):
-        # set M matrix
+        """
+        Set the M matrix
+        """
         wan90.w90_library.w90_set_m_local(
             self.data, np.asfortranarray(self.M_matrix_loc)
         )
 
     def set_a_matrix(self):
+        """
+        Set the initial A matrix as U_opt matrix
+        """
         wan90.w90_library.w90_set_u_opt(self.data, np.asfortranarray(self.A_matrix_loc))
 
     def set_u_matrix(self):
@@ -1192,16 +1200,20 @@ class W90:
         status = wan90.w90_library.w90_project_overlap(  # noqa: F841
             self.data, self.ftn_output, self.ftn_error
         )
+        print(f"w90_project_overlap returned with status: {status}", flush=True)
 
     def disentangle(self):
         status = wan90.w90_library.w90_disentangle(  # noqa: F841
             self.data, self.ftn_output, self.ftn_error
         )
+        print(f"w90_disentangle returned with status: {status}", flush=True)
 
     def wannierise(self):
         status = wan90.w90_library.w90_wannierise(  # noqa: F841
             self.data, self.ftn_output, self.ftn_error
         )
+        print(f"w90_wannierise returned with status: {status}", flush=True)
+        time.sleep(3)
 
     def disentangle_or_project(self):
         if self.data.num_wann == self.data.num_bands:
@@ -1210,6 +1222,7 @@ class W90:
         else:
             print("Performing disentanglement as num_wann < num_bands", flush=True)
             self.disentangle()
+        time.sleep(3)
 
     def run(self):
         """
@@ -1226,31 +1239,30 @@ class W90:
         self.wannierise()
         print("Wannierisation finished", flush=True)
 
-        # Convert outputs to the correct data type
-
-        self.U_matrix = self.data.u_matrix
-        print(self.U_matrix)
-        self.U_matrix_opt = self.data.u_matrix_opt
-
-        wannier_centres = np.zeros((self.data.num_wann, 3), dtype=np.float64, order="F")
-        wan90.w90_library.w90_get_centres(self.data, wannier_centres)
-        self.wann_centres = wannier_centres
-
-        wannier_spreads = np.zeros(self.data.num_wann, dtype=np.float64, order="F")
-        wan90.w90_library.w90_get_spreads(self.data, wannier_spreads)
-        self.wann_spreads = wannier_spreads
+    def set_outputs(self):
+        """
+        Set the outputs after wannierisation
+        """
+        print("Getting Wannier centres...", flush=True)
+        wann_centres = self.data.wannier_data.centres
+        self.wann_centres = wann_centres.T
+        print("Wannier centres obtained:", self.wann_centres, flush=True)
+        print("Getting Wannier spreads...", flush=True)
+        self.wann_spreads = self.data.wannier_data.spreads
+        print("Wannier spreads obtained:", self.wann_spreads, flush=True)
 
         self.spread = np.sum(self.wann_spreads)
 
-        # Update lwindow to True
-        try:
-            lwindow = self.data.dis_manifold.lwindow
-        except Exception:
-            lwindow = []
-        self.lwindow = lwindow
-
         wan90.w90_library.w90_plot(self.data, self.ftn_output, self.ftn_error)
+        time.sleep(3)
         wan90.w90_library_extra.print_times(self.data, self.ftn_output)
+
+        print("Getting U matrices...", flush=True)
+        self.U_matrix = self.data.u_matrix
+        print("U matrix shapes:", self.U_matrix.shape, flush=True)
+        self.U_matrix_opt = self.data.u_matrix_opt
+        print("U_opt matrix shapes:", self.U_matrix_opt.shape, flush=True)
+        self.lwindow = self.data.dis_manifold.lwindow
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
     R_wz_sc = R_wz_sc
@@ -1419,7 +1431,7 @@ class W90:
         The grid size is based on the lattice parameters
         """
         grid_size = (
-            np.ceil(np.linalg.norm(self.real_lattice_loc, axis=1) / 0.12)
+            np.ceil(np.linalg.norm(self.real_lattice_loc, axis=1) / 0.25)
             .astype(int)
             .tolist()
         )
@@ -1546,7 +1558,7 @@ class W90:
 
         for k_id in range(self.num_kpts_loc):
             mo_included = self.mo_coeff_kpts[k_id][:, self.band_included_list]
-            mo_in_window = lwindow[k_id]
+            mo_in_window = lwindow[k_id][: len(self.band_included_list)]
             C_opt = mo_included[:, mo_in_window].dot(
                 u_matrix_opt[k_id][:, mo_in_window].T
             )
