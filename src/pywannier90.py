@@ -860,6 +860,10 @@ class W90:
         self.set_u_matrix()
         print("Exporting unk file...", flush=True)
         self.export_unk_file()
+        print("Setup complete. Starting Wannier90_run...", flush=True)
+        print(self.data.setup_complete)
+        self.data.setup_complete = True
+        print(self.data.setup_complete)
         self.disentangle_or_project()
         self.run()
         self.set_outputs()
@@ -1122,6 +1126,8 @@ class W90:
         self.nnlist = self.data.kmesh_info.nnlist
         self.nncell = self.data.kmesh_info.nncell
 
+        self.use_bloch_phases = self.data.use_bloch_phases
+
         try:
             exclude_bands = list(self.data.exclude_bands)
         except Exception:
@@ -1181,12 +1187,12 @@ class W90:
         """
         Set the initial U matrix
         """
-        u_matrix = np.zeros(
+        self.u_matrix = np.zeros(
             (self.data.num_wann, self.data.num_wann, self.data.num_kpts),
             dtype=np.cdouble,
             order="F",
         )
-        wan90.w90_library.w90_set_u_matrix(self.data, u_matrix)
+        wan90.w90_library.w90_set_u_matrix(self.data, self.u_matrix)
 
     def set_eigenvalues(self, eigenvalues_loc):
         """
@@ -1431,17 +1437,22 @@ class W90:
         The grid size is based on the lattice parameters
         """
         grid_size = (
-            np.ceil(np.linalg.norm(self.real_lattice_loc, axis=1) / 0.25)
+            np.ceil(np.linalg.norm(self.real_lattice_loc, axis=1) / 0.4)
             .astype(int)
             .tolist()
         )
+        print("DEBUG: grid_size =", grid_size)
+        npoints = int(grid_size[0]) * int(grid_size[1]) * int(grid_size[2])
+        nbands = int(self.num_bands_loc)
+        print("DEBUG: npoints, nbands =", npoints, nbands)
+        bytes_complex128 = 16
+        estimated_bytes = npoints * nbands * bytes_complex128
+        print("DEBUG: estimated u_mo bytes (GB) =", estimated_bytes / 1024**3)
+        # if estimated_bytes > 4 * 1024**3:   # arbitrary 4 GiB safety cutoff
+        #    raise MemoryError(f"Refusing to allocate ~{estimated_bytes/1024**3:.2f} GiB — reduce grid or stream to disk")
         self.export_unk(grid=grid_size)
 
     def export_unk(self, grid=[50, 50, 50]):
-        """
-        Export the periodic part of BF in a real space grid for plotting with wannier90
-        """
-
         grids_coor, _ = periodic_grid(self.cell, grid, order="F")
 
         for k_id in range(np.asarray(self.kmf.mo_energy_kpts[0]).ndim):
