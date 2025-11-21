@@ -23,7 +23,7 @@ cell.a = np.array(
 )
 # cell.gs = [15] * 3
 cell.verbose = 5
-cell.basis = "gth-tzvp"
+cell.basis = "def2-tzvp"
 cell.unit = "Angstrom"
 cell.pseudo = "gth-pbe"
 cell.exp_to_discard = 0.1
@@ -45,8 +45,8 @@ guiding_centres : true
 wannier_plot           : true
 wannier_plot_supercell : 1
 wannier_plot_list      =  1-6
-dis_num_iter   : 10
-num_iter       : 10
+num_iter      : 10
+dis_num_iter  : 20
 write_hr       : true
 write_tb       : true
 begin projections
