@@ -1268,7 +1268,10 @@ class W90:
         print("U matrix shapes:", self.U_matrix.shape, flush=True)
         self.U_matrix_opt = self.data.u_matrix_opt
         print("U_opt matrix shapes:", self.U_matrix_opt.shape, flush=True)
-        self.lwindow = self.data.dis_manifold.lwindow
+        try:
+            self.lwindow = self.data.dis_manifold.lwindow
+        except Exception:
+            self.lwindow = []
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
     R_wz_sc = R_wz_sc
