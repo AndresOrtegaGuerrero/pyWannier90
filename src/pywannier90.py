@@ -1458,7 +1458,7 @@ class W90:
     def export_unk(self, grid=[50, 50, 50]):
         grids_coor, _ = periodic_grid(self.cell, grid, order="F")
 
-        for k_id in range(np.asarray(self.kmf.mo_energy_kpts[0]).ndim):
+        for k_id in range(np.asarray(self.mo_energy_kpts[0]).ndim):
             spin = ".1"
             if self.spin == "down" or self.spin == "mix":
                 spin = ".2"
