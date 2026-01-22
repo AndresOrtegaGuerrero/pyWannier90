@@ -148,9 +148,12 @@ def transform(x_vec, z_vec):
     Construct a transformation matrix to transform r_vec to the new coordinate system defined by x_vec and z_vec
     """
 
-    x_vec = x_vec / np.linalg.norm(np.asarray(x_vec))
     z_vec = z_vec / np.linalg.norm(np.asarray(z_vec))
-    assert x_vec.dot(z_vec) == 0  # x and z have to be orthogonal to one another
+    x_vec = x_vec - np.dot(x_vec, z_vec) * z_vec
+    x_vec = x_vec / np.linalg.norm(x_vec)
+    assert np.isclose(
+        x_vec.dot(z_vec), 0.0, atol=1e-12
+    )  # x and z have to be orthogonal to one another
     y_vec = -np.cross(x_vec, z_vec)
     new = np.asarray([x_vec, y_vec, z_vec])
     original = np.asarray([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
@@ -1271,7 +1274,8 @@ class W90:
         try:
             self.lwindow = self.data.dis_manifold.lwindow
         except Exception:
-            self.lwindow = []
+            lwindow_array = np.ones((self.num_kpts_loc, self.num_wann_loc), dtype=bool)
+            self.lwindow = lwindow_array.tolist()
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
     R_wz_sc = R_wz_sc
