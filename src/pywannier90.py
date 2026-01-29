@@ -1288,18 +1288,27 @@ class W90:
             "You must wannierize first, then you can run this function"
         )
         eigenvals_in_window = []
+
+        print("Constructing Hamiltonian in k-space...", flush=True)
+
+        n_ord_u_matrix_opt = np.transpose(self.U_matrix_opt, axes=(2, 1, 0))
+        n_ord_u_matrix = np.transpose(self.U_matrix, axes=(2, 1, 0))
+
         for k_id in range(self.num_kpts_loc):
             mo_included = self.mo_energy_kpts[k_id][self.band_included_list]
             orbs_in_win = self.lwindow[k_id]
             mo_in_window = mo_included[orbs_in_win]
-            U_matrix_opt = self.U_matrix_opt[k_id][:, orbs_in_win].T
+            U_matrix_opt = n_ord_u_matrix_opt[k_id][:, orbs_in_win].T
             eigenvals = lib.einsum(
                 "m,mo,mo->o", mo_in_window, U_matrix_opt.conj(), U_matrix_opt
             )
             eigenvals_in_window.append(eigenvals)
 
         hamiltonian_kpts = lib.einsum(
-            "kso,ko,kto->kst", self.U_matrix.conj(), eigenvals_in_window, self.U_matrix
+            "kso,ko,kto->kst",
+            n_ord_u_matrix.conj(),
+            eigenvals_in_window,
+            n_ord_u_matrix,
         )
         return hamiltonian_kpts
 
