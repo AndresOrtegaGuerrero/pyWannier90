@@ -148,9 +148,12 @@ def transform(x_vec, z_vec):
     Construct a transformation matrix to transform r_vec to the new coordinate system defined by x_vec and z_vec
     """
 
-    x_vec = x_vec / np.linalg.norm(np.asarray(x_vec))
     z_vec = z_vec / np.linalg.norm(np.asarray(z_vec))
-    assert x_vec.dot(z_vec) == 0  # x and z have to be orthogonal to one another
+    x_vec = x_vec - np.dot(x_vec, z_vec) * z_vec
+    x_vec = x_vec / np.linalg.norm(x_vec)
+    assert np.isclose(
+        x_vec.dot(z_vec), 0.0, atol=1e-12
+    )  # x and z have to be orthogonal to one another
     y_vec = -np.cross(x_vec, z_vec)
     new = np.asarray([x_vec, y_vec, z_vec])
     original = np.asarray([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
@@ -1271,7 +1274,8 @@ class W90:
         try:
             self.lwindow = self.data.dis_manifold.lwindow
         except Exception:
-            self.lwindow = []
+            lwindow_array = np.ones((self.num_kpts_loc, self.num_wann_loc), dtype=bool)
+            self.lwindow = lwindow_array.tolist()
 
     get_wigner_seitz_supercell = get_wigner_seitz_supercell
     R_wz_sc = R_wz_sc
@@ -1284,18 +1288,27 @@ class W90:
             "You must wannierize first, then you can run this function"
         )
         eigenvals_in_window = []
+
+        print("Constructing Hamiltonian in k-space...", flush=True)
+
+        n_ord_u_matrix_opt = np.transpose(self.U_matrix_opt, axes=(2, 1, 0))
+        n_ord_u_matrix = np.transpose(self.U_matrix, axes=(2, 1, 0))
+
         for k_id in range(self.num_kpts_loc):
             mo_included = self.mo_energy_kpts[k_id][self.band_included_list]
             orbs_in_win = self.lwindow[k_id]
             mo_in_window = mo_included[orbs_in_win]
-            U_matrix_opt = self.U_matrix_opt[k_id][:, orbs_in_win].T
+            U_matrix_opt = n_ord_u_matrix_opt[k_id][:, orbs_in_win].T
             eigenvals = lib.einsum(
                 "m,mo,mo->o", mo_in_window, U_matrix_opt.conj(), U_matrix_opt
             )
             eigenvals_in_window.append(eigenvals)
 
         hamiltonian_kpts = lib.einsum(
-            "kso,ko,kto->kst", self.U_matrix.conj(), eigenvals_in_window, self.U_matrix
+            "kso,ko,kto->kst",
+            n_ord_u_matrix.conj(),
+            eigenvals_in_window,
+            n_ord_u_matrix,
         )
         return hamiltonian_kpts
 
