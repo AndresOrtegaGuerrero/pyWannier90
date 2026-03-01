@@ -150,13 +150,6 @@ def get_uniform_grids(cell, mesh=None, order="C", **kwargs):
     return coords
 
 
-def get_uniform_weights(cell, mesh):
-    ngrids = np.prod(mesh)
-    weights = np.empty(ngrids)
-    weights[:] = cell.vol / ngrids
-    return weights
-
-
 def save_kmf(kmf, chkfile):
     """Save a wavefunction"""
     from pyscf.lib.chkfile import save
@@ -273,38 +266,19 @@ def get_WF0s(num_kpts, kpts, supercell, grid, u_mo):
     return wann_func
 
 
-def angle(v1, v2):
-    """
-    Return the angle (in radiant between v1 and v2)
-    """
-
-    v1 = np.asarray(v1)
-    v2 = np.asarray(v2)
-    cosa = v1.dot(v2) / np.linalg.norm(v1) / np.linalg.norm(v2)
-    return np.arccos(cosa)
-
-
 def transform(x_vec, z_vec):
     """
     Construct a transformation matrix to transform r_vec to the new coordinate system defined by x_vec and z_vec
     """
 
-    z_vec = z_vec / np.linalg.norm(np.asarray(z_vec))
+    z_vec = np.asarray(z_vec, dtype=float)
+    z_vec /= np.linalg.norm(z_vec)
+
+    x_vec = np.asarray(x_vec, dtype=float)
     x_vec = x_vec - np.dot(x_vec, z_vec) * z_vec
-    x_vec = x_vec / np.linalg.norm(x_vec)
-    assert np.isclose(
-        x_vec.dot(z_vec), 0.0, atol=1e-12
-    )  # x and z have to be orthogonal to one another
-    y_vec = -np.cross(x_vec, z_vec)
-    new = np.asarray([x_vec, y_vec, z_vec])
-    original = np.asarray([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
-
-    tran_matrix = np.empty([3, 3])
-    for row in range(3):
-        for col in range(3):
-            tran_matrix[row, col] = np.cos(angle(original[row], new[col]))
-
-    return tran_matrix.T
+    x_vec /= np.linalg.norm(x_vec)
+    y_vec = np.cross(z_vec, x_vec)
+    return np.vstack([x_vec, y_vec, z_vec])
 
 
 def cartesian_prod(arrays, out=None, order="C"):
@@ -356,27 +330,17 @@ def R_r(r_norm, r=1, zona=1):
     """
     Radial functions used to compute \Theta_{l,m_r}(\theta,\phi)
     """
-
+    zr = zona * r_norm
+    pref = zona**1.5
     if r == 1:
-        R_r = 2 * zona ** (3 / 2) * np.exp(-zona * r_norm)
+        return 2 * pref * np.exp(-zr)
     elif r == 2:
-        R_r = (
-            1
-            / 2
-            / np.sqrt(2)
-            * zona ** (3 / 2)
-            * (2 - zona * r_norm)
-            * np.exp(-zona * r_norm / 2)
-        )
-    else:
-        R_r = (
-            np.sqrt(4 / 27)
-            * zona ** (3 / 2)
-            * (1 - 2 * zona * r_norm / 3 + 2 * (zona**2) * (r_norm**2) / 27)
-            * np.exp(-zona * r_norm / 3)
-        )
+        return (1 / (2 * np.sqrt(2))) * pref * (2 - zr) * np.exp(-zr / 2)
 
-    return R_r
+    else:
+        return (
+            np.sqrt(4 / 27) * pref * (1 - 2 * zr / 3 + 2 * zr**2 / 27) * np.exp(-zr / 3)
+        )
 
 
 def theta(func, cost, phi):
@@ -538,28 +502,30 @@ def g_r(grids_coor, site, l, mr, r, zona, x_axis=[1, 0, 0], z_axis=[0, 0, 1], un
         theta_lmr                    : an array (ngrid, value) of g(r)
 
     """
-
-    unit_conv = 1
+    # Unit conversion
     if unit == "A":
-        unit_conv = param.BOHR
+        unit_conv = 1.0 / param.BOHR
+    else:
+        unit_conv = 1.0
 
+    # Build rotation matrix once
+    Rmat = transform(x_axis, z_axis)
+
+    # Shift and rotate
     r_vec = grids_coor - site
-    r_vec = lib.einsum("iv,uv ->iu", r_vec, transform(x_axis, z_axis))
+    r_vec = r_vec @ Rmat.T
+
+    # Norm
     r_norm = np.linalg.norm(r_vec, axis=1)
-    if (r_norm < 1e-8).any():
-        r_vec = grids_coor - site - 1e-5
-        r_vec = lib.einsum("iv,uv ->iu", r_vec, transform(x_axis, z_axis))
-        r_norm = np.linalg.norm(r_vec, axis=1)
+    r_norm = np.where(r_norm < 1e-12, 1e-12, r_norm)
+
+    # Angular variables
     cost = r_vec[:, 2] / r_norm
+    cost = np.clip(cost, -1.0, 1.0)
 
-    phi = np.empty_like(r_norm)
-    larger_idx = r_vec[:, 0] > 1e-8
-    smaller_idx = r_vec[:, 0] < -1e-8
-    neither_idx = np.logical_not(np.logical_or(larger_idx, smaller_idx))
-    phi[larger_idx] = np.arctan(r_vec[larger_idx, 1] / r_vec[larger_idx, 0])
-    phi[smaller_idx] = np.arctan(r_vec[smaller_idx, 1] / r_vec[smaller_idx, 0]) + np.pi
-    phi[neither_idx] = np.sign(r_vec[neither_idx, 1]) * 0.5 * np.pi
+    phi = np.arctan2(r_vec[:, 1], r_vec[:, 0])
 
+    # Projection
     return theta_lmr(l, mr, cost, phi) * R_r(r_norm * unit_conv, r=r, zona=zona)
 
 
@@ -1121,6 +1087,27 @@ class W90:
                 A_matrix_loc[:, :, k] = Amn
             return A_matrix_loc
 
+        # Compute AO projectors
+        G = np.zeros(
+            (self.cell.nao_nr(), self.num_wann_loc), dtype=np.complex128, order="F"
+        )
+        for n in range(self.num_wann_loc):
+            frac_site = self.proj_site[n]
+            abs_site = frac_site.dot(self.real_lattice_loc) / param.BOHR
+
+            G[:, n] = build_projector_AO(
+                self.cell,
+                abs_site,
+                self.proj_l[n],
+                self.proj_m[n],
+                self.proj_radial[n],
+                self.proj_zona[n],
+                self.proj_x[n],
+                self.proj_z[n],
+                unit="B",
+            )
+
+        # Look over k-points
         kpts_abs = self.cell.get_abs_kpts(self.kpt_latt_loc)
 
         for k_id, kpt in enumerate(kpts_abs):
@@ -1134,32 +1121,8 @@ class W90:
             # MO coefficients
             C_k = self.mo_coeff_kpts[k_id][:, self.band_included_list]
 
-            for n in range(self.num_wann_loc):
-                # Build projector directly in AO basis
-                frac_site = self.proj_site[n]
-                abs_site = frac_site.dot(self.real_lattice_loc) / param.BOHR
-                proj_l, proj_m, proj_radial, proj_zona, proj_x, proj_z = (
-                    self.proj_l[n],
-                    self.proj_m[n],
-                    self.proj_radial[n],
-                    self.proj_zona[n],
-                    self.proj_x[n],
-                    self.proj_z[n],
-                )
-                g_ao = build_projector_AO(
-                    self.cell,
-                    abs_site,
-                    proj_l,
-                    proj_m,
-                    proj_radial,
-                    proj_zona,
-                    proj_x,
-                    proj_z,
-                    unit="B",
-                )
-
-                # Direct Hilbert-space projection
-                A_matrix_loc[:, n, k_id] = C_k.conj().T @ (S_k @ g_ao)
+            # Matrix projection
+            A_matrix_loc[:, :, k_id] = C_k.conj().T @ (S_k @ G)
 
         return A_matrix_loc
 
