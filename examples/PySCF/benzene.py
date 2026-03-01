@@ -23,34 +23,32 @@ cell.a = np.array(
 )
 # cell.gs = [15] * 3
 cell.verbose = 5
-cell.basis = "def2-tzvp"
+cell.basis = "gth-tzvp"
 cell.unit = "Angstrom"
 cell.pseudo = "gth-pbe"
 cell.exp_to_discard = 0.1
 cell.precision = 1e-10
 cell.ke_cutoff = 120
 cell.build()
-
-
 nk = [1, 1, 1]
 abs_kpts = cell.make_kpts(nk)
-kmf = dft.KRKS(cell, abs_kpts).density_fit()
+kmf = dft.KRKS(cell, abs_kpts)
 kmf.xc = "pbe"
 ekpt = kmf.run()
 
 num_wann = 6
 keywords = """
+num_iter      : 100
+dis_num_iter  : 200
 translate_home_cell : true
 guiding_centres : true
 wannier_plot           : true
 wannier_plot_supercell : 1
 wannier_plot_list      =  1-6
-num_iter      : 10
-dis_num_iter  : 20
 write_hr       : true
 write_tb       : true
 begin projections
-C:pz:zona=6
+C:pz
 end projections
 """
 
@@ -58,4 +56,4 @@ w90 = pywannier90.W90(kmf, cell, nk, num_wann, gamma=True, other_keywords=keywor
 
 
 w90.kernel()
-w90.plot_wf(grid=[60, 60, 60], supercell=nk)
+w90.plot_wf(grid=[60, 60, 60])

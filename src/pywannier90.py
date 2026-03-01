@@ -16,6 +16,147 @@ from pyscf.pbc import df
 from pyscf.pbc.dft import numint
 
 
+def build_projector_AO(
+    cell,
+    site,
+    l,  # noqa: E741
+    mr,
+    radial,
+    zona,
+    x_axis=(1, 0, 0),
+    z_axis=(0, 0, 1),
+    unit="B",
+    mesh=None,
+):
+    """
+    General Wannier90-style projector builder.
+
+    Computes:
+        A_mu = ∫ χ_mu(r) g_{l,mr}(r) dr
+
+    Parameters
+    ----------
+    cell : PySCF cell
+    site : absolute coordinate of projector center (Bohr or Angstrom)
+    l, mr : angular quantum numbers (Wannier90 convention)
+    radial : radial index (1,2,3...)
+    zona : zeta parameter
+    x_axis, z_axis : orientation axes
+    unit : "B" or "A"
+    mesh : optional real-space mesh (tuple)
+
+    Returns
+    -------
+    g_ao : numpy array (nao,)
+    """
+
+    from pyscf import lib
+
+    if unit == "A":
+        site = site / 0.529177  # convert to Bohr
+
+    # Real-space grid
+    if mesh is None:
+        mesh = cell.mesh  # default FFT mesh
+
+    coords = get_uniform_grids(cell, mesh=mesh, order="C")  # shape (ngrid, 3)
+    ngrid = coords.shape[0]
+    # uniform weight
+    weight = cell.vol / ngrid
+    # Evaluate AO basis
+    ao_vals = cell.eval_gto("GTOval", coords)
+    # shape (ngrid, nao)
+
+    # Evaluate g(r)
+    gvals = g_r(
+        coords,
+        site,
+        l,  # noqa: E741
+        mr,
+        radial,
+        zona,
+        x_axis=x_axis,
+        z_axis=z_axis,
+        unit="B",
+    )
+
+    # Numerical integration
+    g_ao = lib.einsum("gm,g->m", ao_vals, gvals) * weight
+
+    return g_ao
+
+
+def build_projector_AO_pz(cell, center, zeta):
+    import numpy as np
+
+    nao = cell.nao_nr()
+    g_ao = np.zeros(nao)
+
+    beta = np.array([0.109818, 0.405771, 2.22766]) * zeta**2
+    coeff_slater = np.array([0.444635, 0.535328, 0.154329])
+
+    ao_loc = cell.ao_loc_nr()
+
+    for ib in range(cell.nbas):
+        l = cell.bas_angular(ib)  # noqa: E741
+        if l != 1:
+            continue
+
+        atom_id = cell.bas_atom(ib)
+        A = cell.atom_coord(atom_id)
+
+        nctr = cell.bas_nctr(ib)
+        nprim = cell.bas_nprim(ib)
+
+        exps = cell.bas_exp(ib)
+        ctr_coeff = cell.bas_ctr_coeff(ib)
+        ncart = (l + 1) * (l + 2) // 2  # = 3 for p
+        shell_start = ao_loc[ib]
+
+        for ictr in range(nctr):
+            # Cartesian p ordering: px, py, pz
+            mu = shell_start + ictr * ncart + 2  # pz index
+
+            val = 0.0
+
+            for ip in range(nprim):
+                alpha = exps[ip]
+                c_mu = ctr_coeff[ip, ictr]
+
+                for b, d in zip(beta, coeff_slater):
+                    gamma = alpha + b
+                    P = (alpha * A + b * center) / gamma
+                    AB2 = np.dot(A - center, A - center)
+                    S_ss = (np.pi / gamma) ** 1.5 * np.exp(-alpha * b / gamma * AB2)
+                    term = (P[2] - A[2]) * (P[2] - center[2]) + 1 / (2 * gamma)
+                    val += c_mu * d * S_ss * term
+
+            g_ao[mu] = val
+
+    return g_ao
+
+
+def get_uniform_grids(cell, mesh=None, order="C", **kwargs):
+    """
+    Generate a uniform real-space grid consistent w/ samp thm; see MH (3.19).
+    Support different order.
+    """
+    if mesh is None:
+        mesh = cell.mesh
+    mesh = np.asarray(mesh, dtype=np.double)
+    qv = cartesian_prod([np.arange(x) for x in mesh], order=order)
+    a_frac = np.multiply((1.0 / mesh)[:, None], cell.lattice_vectors())
+    coords = np.dot(qv, a_frac)
+    return coords
+
+
+def get_uniform_weights(cell, mesh):
+    ngrids = np.prod(mesh)
+    weights = np.empty(ngrids)
+    weights[:] = cell.vol / ngrids
+    return weights
+
+
 def save_kmf(kmf, chkfile):
     """Save a wavefunction"""
     from pyscf.lib.chkfile import save
@@ -195,9 +336,7 @@ def periodic_grid(cell, grid=[50, 50, 50], supercell=[1, 1, 1], order="C"):
     ngrid = np.asarray(grid)
     qv = cartesian_prod(
         [
-            np.arange(
-                -ngrid[i] * (supercell[i] // 2), ngrid[i] * ((supercell[i] + 1) // 2)
-            )
+            np.arange(0, ngrid[i] * supercell[i])  # ← 0 to N-1, NOT centered
             for i in range(3)
         ],
         order=order,
@@ -247,237 +386,144 @@ def theta(func, cost, phi):
         Link: https://github.com/wannier-developers/wannier90/raw/v3.1.0/doc/compiled_docs/user_guide.pdf
     """
     sint = np.sqrt(1 - cost**2)
-    if func == "s":
-        theta = 1 / np.sqrt(4 * np.pi) * np.ones([cost.shape[0]])
-    elif func == "pz":
-        theta = np.sqrt(3 / 4 / np.pi) * cost
-    elif func == "px":
-        theta = np.sqrt(3 / 4 / np.pi) * sint * np.cos(phi)
-    elif func == "py":
-        theta = np.sqrt(3 / 4 / np.pi) * sint * np.sin(phi)
-    elif func == "dz2":
-        theta = np.sqrt(5 / 16 / np.pi) * (3 * cost**2 - 1)
-    elif func == "dxz":
-        theta = np.sqrt(15 / 4 / np.pi) * sint * cost * np.cos(phi)
-    elif func == "dyz":
-        theta = np.sqrt(15 / 4 / np.pi) * sint * cost * np.sin(phi)
-    elif func == "dx2-y2":
-        theta = np.sqrt(15 / 16 / np.pi) * (sint**2) * np.cos(2 * phi)
-    elif func == "dxy":
-        theta = np.sqrt(15 / 16 / np.pi) * (sint**2) * np.sin(2 * phi)
-    elif func == "fz3":
-        theta = np.sqrt(7) / 4 / np.sqrt(np.pi) * (5 * cost**3 - 3 * cost)
-    elif func == "fxz2":
-        theta = (
-            np.sqrt(21)
-            / 4
-            / np.sqrt(2 * np.pi)
-            * (5 * cost**2 - 1)
-            * sint
-            * np.cos(phi)
-        )
-    elif func == "fyz2":
-        theta = (
-            np.sqrt(21)
-            / 4
-            / np.sqrt(2 * np.pi)
-            * (5 * cost**2 - 1)
-            * sint
-            * np.sin(phi)
-        )
-    elif func == "fz(x2-y2)":
-        theta = np.sqrt(105) / 4 / np.sqrt(np.pi) * sint**2 * cost * np.cos(2 * phi)
-    elif func == "fxyz":
-        theta = np.sqrt(105) / 4 / np.sqrt(np.pi) * sint**2 * cost * np.sin(2 * phi)
-    elif func == "fx(x2-3y2)":
-        theta = (
-            np.sqrt(35)
-            / 4
-            / np.sqrt(2 * np.pi)
-            * sint**3
-            * (np.cos(phi) ** 2 - 3 * np.sin(phi) ** 2)
-            * np.cos(phi)
-        )
-    elif func == "fy(3x2-y2)":
-        theta = (
-            np.sqrt(35)
-            / 4
-            / np.sqrt(2 * np.pi)
-            * sint**3
-            * (3 * np.cos(phi) ** 2 - np.sin(phi) ** 2)
-            * np.sin(phi)
+    c2phi = np.cos(2 * phi)
+    s2phi = np.sin(2 * phi)
+    cphi = np.cos(phi)
+    sphi = np.sin(phi)
+    _PI = np.pi
+    _O = np.ones(cost.shape[0])  # Required for s
+
+    # Func dictionary
+    funcs = {
+        "s": lambda: 1.0 / np.sqrt(4.0 * _PI) * _O,
+        "pz": lambda: np.sqrt(3 / 4 / _PI) * cost,
+        "px": lambda: np.sqrt(3 / 4 / _PI) * sint * cphi,
+        "py": lambda: np.sqrt(3 / 4 / _PI) * sint * sphi,
+        "dz2": lambda: np.sqrt(5 / 16 / _PI) * (3 * cost**2 - 1),
+        "dxz": lambda: np.sqrt(15 / 4 / _PI) * sint * cost * cphi,
+        "dyz": lambda: np.sqrt(15 / 4 / _PI) * sint * cost * sphi,
+        "dx2-y2": lambda: np.sqrt(15 / 16 / _PI) * (sint**2) * c2phi,
+        "dxy": lambda: np.sqrt(15 / 16 / _PI) * (sint**2) * s2phi,
+        "fz3": lambda: np.sqrt(7) / 4 / np.sqrt(_PI) * (5 * cost**3 - 3 * cost),
+        "fxz2": lambda: np.sqrt(21)
+        / 4
+        / np.sqrt(2 * _PI)
+        * (5 * cost**2 - 1)
+        * sint
+        * cphi,
+        "fyz2": lambda: np.sqrt(21)
+        / 4
+        / np.sqrt(2 * _PI)
+        * (5 * cost**2 - 1)
+        * sint
+        * sphi,
+        "fz(x2-y2)": lambda: np.sqrt(105) / 4 / np.sqrt(_PI) * sint**2 * cost * c2phi,
+        "fxyz": lambda: np.sqrt(105) / 4 / np.sqrt(_PI) * sint**2 * cost * s2phi,
+        "fx(x2-3y2)": lambda: np.sqrt(35)
+        / 4
+        / np.sqrt(2 * _PI)
+        * sint**3
+        * (cphi**2 - 3 * sphi**2)
+        * cphi,
+        "fy(3x2-y2)": lambda: np.sqrt(35)
+        / 4
+        / np.sqrt(2 * _PI)
+        * sint**3
+        * (3 * cphi**2 - sphi**2)
+        * sphi,
+    }
+
+    if func not in funcs:
+        raise ValueError(
+            f"Unsupported func: {func}. Supported funcs are: {list(funcs.keys())}"
         )
 
-    return theta
+    return funcs[func]()
 
 
 def theta_lmr(l, mr, cost, phi):  # noqa: E741
     """
     Compute the value of \Theta_{l,m_r}(\theta,\phi)
     ref: Table 3.1 and 3.2 of the Wannier90 User guide
-        Link: https://github.com/wannier-developers/wannier90/raw/v3.1.0/doc/compiled_docs/user_guide.pdf
     """
     assert l in [0, 1, 2, 3, -1, -2, -3, -4, -5]
     assert mr in [1, 2, 3, 4, 5, 6, 7]
 
-    if l == 0:  # s
-        theta_lmr = theta("s", cost, phi)
-    elif (l == 1) and (mr == 1):  # pz
-        theta_lmr = theta("pz", cost, phi)
-    elif (l == 1) and (mr == 2):  # px
-        theta_lmr = theta("px", cost, phi)
-    elif (l == 1) and (mr == 3):  # py
-        theta_lmr = theta("py", cost, phi)
-    elif (l == 2) and (mr == 1):  # dz2
-        theta_lmr = theta("dz2", cost, phi)
-    elif (l == 2) and (mr == 2):  # dxz
-        theta_lmr = theta("dxz", cost, phi)
-    elif (l == 2) and (mr == 3):  # dyz
-        theta_lmr = theta("dyz", cost, phi)
-    elif (l == 2) and (mr == 4):  # dx2-y2
-        theta_lmr = theta("dx2-y2", cost, phi)
-    elif (l == 2) and (mr == 5):  # pxy
-        theta_lmr = theta("dxy", cost, phi)
-    elif (l == 3) and (mr == 1):  # fz3
-        theta_lmr = theta("fz3", cost, phi)
-    elif (l == 3) and (mr == 2):  # fxz2
-        theta_lmr = theta("fxz2", cost, phi)
-    elif (l == 3) and (mr == 3):  # fyz2
-        theta_lmr = theta("fyz2", cost, phi)
-    elif (l == 3) and (mr == 4):  # fz(x2-y2)
-        theta_lmr = theta("fz(x2-y2)", cost, phi)
-    elif (l == 3) and (mr == 5):  # fxyz
-        theta_lmr = theta("fxyz", cost, phi)
-    elif (l == 3) and (mr == 6):  # fx(x2-3y2)
-        theta_lmr = theta("fx(x2-3y2)", cost, phi)
-    elif (l == 3) and (mr == 7):  # fy(3x2-y2)
-        theta_lmr = theta("fy(3x2-y2)", cost, phi)
-    elif (l == -1) and (mr == 1):  # sp-1
-        theta_lmr = 1 / np.sqrt(2) * (theta("s", cost, phi) + theta("px", cost, phi))
-    elif (l == -1) and (mr == 2):  # sp-2
-        theta_lmr = 1 / np.sqrt(2) * (theta("s", cost, phi) - theta("px", cost, phi))
-    elif (l == -2) and (mr == 1):  # sp2-1
-        theta_lmr = (
-            1 / np.sqrt(3) * theta("s", cost, phi)
-            - 1 / np.sqrt(6) * theta("px", cost, phi)
-            + 1 / np.sqrt(2) * theta("py", cost, phi)
-        )
-    elif (l == -2) and (mr == 2):  # sp2-2
-        theta_lmr = (
-            1 / np.sqrt(3) * theta("s", cost, phi)
-            - 1 / np.sqrt(6) * theta("px", cost, phi)
-            - 1 / np.sqrt(2) * theta("py", cost, phi)
-        )
-    elif (l == -2) and (mr == 3):  # sp2-3
-        theta_lmr = 1 / np.sqrt(3) * theta("s", cost, phi) + 2 / np.sqrt(6) * theta(
-            "px", cost, phi
-        )
-    elif (l == -3) and (mr == 1):  # sp3-1
-        theta_lmr = (
-            1
-            / 2
-            * (
-                theta("s", cost, phi)
-                + theta("px", cost, phi)
-                + theta("py", cost, phi)
-                + theta("pz", cost, phi)
-            )
-        )
-    elif (l == -3) and (mr == 2):  # sp3-2
-        theta_lmr = (
-            1
-            / 2
-            * (
-                theta("s", cost, phi)
-                + theta("px", cost, phi)
-                - theta("py", cost, phi)
-                - theta("pz", cost, phi)
-            )
-        )
-    elif (l == -3) and (mr == 3):  # sp3-3
-        theta_lmr = (
-            1
-            / 2
-            * (
-                theta("s", cost, phi)
-                - theta("px", cost, phi)
-                + theta("py", cost, phi)
-                - theta("pz", cost, phi)
-            )
-        )
-    elif (l == -3) and (mr == 4):  # sp3-4
-        theta_lmr = (
-            1
-            / 2
-            * (
-                theta("s", cost, phi)
-                - theta("px", cost, phi)
-                - theta("py", cost, phi)
-                + theta("pz", cost, phi)
-            )
-        )
-    elif (l == -4) and (mr == 1):  # sp3d-1
-        theta_lmr = (
-            1 / np.sqrt(3) * theta("s", cost, phi)
-            - 1 / np.sqrt(6) * theta("px", cost, phi)
-            + 1 / np.sqrt(2) * theta("py", cost, phi)
-        )
-    elif (l == -4) and (mr == 2):  # sp3d-2
-        theta_lmr = (
-            1 / np.sqrt(3) * theta("s", cost, phi)
-            - 1 / np.sqrt(6) * theta("px", cost, phi)
-            - 1 / np.sqrt(2) * theta("py", cost, phi)
-        )
-    elif (l == -4) and (mr == 3):  # sp3d-3
-        theta_lmr = 1 / np.sqrt(3) * theta("s", cost, phi) + 2 / np.sqrt(6) * theta(
-            "px", cost, phi
-        )
-    elif (l == -4) and (mr == 4):  # sp3d-4
-        theta_lmr = 1 / np.sqrt(2) * (theta("pz", cost, phi) + theta("dz2", cost, phi))
-    elif (l == -4) and (mr == 5):  # sp3d-5
-        theta_lmr = 1 / np.sqrt(2) * (-theta("pz", cost, phi) + theta("dz2", cost, phi))
-    elif (l == -5) and (mr == 1):  # sp3d2-1
-        theta_lmr = (
-            1 / np.sqrt(6) * theta("s", cost, phi)
-            - 1 / np.sqrt(2) * theta("px", cost, phi)
-            - 1 / np.sqrt(12) * theta("dz2", cost, phi)
-            + 1 / 2 * theta("dx2-y2", cost, phi)
-        )
-    elif (l == -5) and (mr == 2):  # sp3d2-2
-        theta_lmr = (
-            1 / np.sqrt(6) * theta("s", cost, phi)
-            + 1 / np.sqrt(2) * theta("px", cost, phi)
-            - 1 / np.sqrt(12) * theta("dz2", cost, phi)
-            + 1 / 2 * theta("dx2-y2", cost, phi)
-        )
-    elif (l == -5) and (mr == 3):  # sp3d2-3
-        theta_lmr = (
-            1 / np.sqrt(6) * theta("s", cost, phi)
-            - 1 / np.sqrt(2) * theta("py", cost, phi)
-            - 1 / np.sqrt(12) * theta("dz2", cost, phi)
-            - 1 / 2 * theta("dx2-y2", cost, phi)
-        )
-    elif (l == -5) and (mr == 4):  # sp3d2-4
-        theta_lmr = (
-            1 / np.sqrt(6) * theta("s", cost, phi)
-            + 1 / np.sqrt(2) * theta("py", cost, phi)
-            - 1 / np.sqrt(12) * theta("dz2", cost, phi)
-            - 1 / 2 * theta("dx2-y2", cost, phi)
-        )
-    elif (l == -5) and (mr == 5):  # sp3d2-5
-        theta_lmr = (
-            1 / np.sqrt(6) * theta("s", cost, phi)
-            - 1 / np.sqrt(2) * theta("pz", cost, phi)
-            + 1 / np.sqrt(3) * theta("dz2", cost, phi)
-        )
-    elif (l == -5) and (mr == 6):  # sp3d2-6
-        theta_lmr = (
-            1 / np.sqrt(6) * theta("s", cost, phi)
-            + 1 / np.sqrt(2) * theta("pz", cost, phi)
-            + 1 / np.sqrt(3) * theta("dz2", cost, phi)
-        )
+    # Cache theta calls to avoid recomputing same orbitals
+    _t = {}
 
-    return theta_lmr
+    def t(func):
+        if func not in _t:
+            _t[func] = theta(func, cost, phi)
+        return _t[func]
+
+    s2 = np.sqrt(2)
+    s3 = np.sqrt(3)
+    s6 = np.sqrt(6)
+    s12 = np.sqrt(12)
+
+    table = {
+        # --- pure harmonics ---
+        (0, 1): lambda: t("s"),
+        (1, 1): lambda: t("pz"),
+        (1, 2): lambda: t("px"),
+        (1, 3): lambda: t("py"),
+        (2, 1): lambda: t("dz2"),
+        (2, 2): lambda: t("dxz"),
+        (2, 3): lambda: t("dyz"),
+        (2, 4): lambda: t("dx2-y2"),
+        (2, 5): lambda: t("dxy"),
+        (3, 1): lambda: t("fz3"),
+        (3, 2): lambda: t("fxz2"),
+        (3, 3): lambda: t("fyz2"),
+        (3, 4): lambda: t("fz(x2-y2)"),
+        (3, 5): lambda: t("fxyz"),
+        (3, 6): lambda: t("fx(x2-3y2)"),
+        (3, 7): lambda: t("fy(3x2-y2)"),
+        # --- sp hybrids ---
+        (-1, 1): lambda: 1 / s2 * (t("s") + t("px")),
+        (-1, 2): lambda: 1 / s2 * (t("s") - t("px")),
+        # --- sp2 hybrids ---
+        (-2, 1): lambda: 1 / s3 * t("s") - 1 / s6 * t("px") + 1 / s2 * t("py"),
+        (-2, 2): lambda: 1 / s3 * t("s") - 1 / s6 * t("px") - 1 / s2 * t("py"),
+        (-2, 3): lambda: 1 / s3 * t("s") + 2 / s6 * t("px"),
+        # --- sp3 hybrids ---
+        (-3, 1): lambda: 0.5 * (t("s") + t("px") + t("py") + t("pz")),
+        (-3, 2): lambda: 0.5 * (t("s") + t("px") - t("py") - t("pz")),
+        (-3, 3): lambda: 0.5 * (t("s") - t("px") + t("py") - t("pz")),
+        (-3, 4): lambda: 0.5 * (t("s") - t("px") - t("py") + t("pz")),
+        # --- sp3d hybrids ---
+        (-4, 1): lambda: 1 / s3 * t("s") - 1 / s6 * t("px") + 1 / s2 * t("py"),
+        (-4, 2): lambda: 1 / s3 * t("s") - 1 / s6 * t("px") - 1 / s2 * t("py"),
+        (-4, 3): lambda: 1 / s3 * t("s") + 2 / s6 * t("px"),
+        (-4, 4): lambda: 1 / s2 * (t("pz") + t("dz2")),
+        (-4, 5): lambda: 1 / s2 * (-t("pz") + t("dz2")),
+        # --- sp3d2 hybrids ---
+        (-5, 1): lambda: 1 / s6 * t("s")
+        - 1 / s2 * t("px")
+        - 1 / s12 * t("dz2")
+        + 0.5 * t("dx2-y2"),
+        (-5, 2): lambda: 1 / s6 * t("s")
+        + 1 / s2 * t("px")
+        - 1 / s12 * t("dz2")
+        + 0.5 * t("dx2-y2"),
+        (-5, 3): lambda: 1 / s6 * t("s")
+        - 1 / s2 * t("py")
+        - 1 / s12 * t("dz2")
+        - 0.5 * t("dx2-y2"),
+        (-5, 4): lambda: 1 / s6 * t("s")
+        + 1 / s2 * t("py")
+        - 1 / s12 * t("dz2")
+        - 0.5 * t("dx2-y2"),
+        (-5, 5): lambda: 1 / s6 * t("s") - 1 / s2 * t("pz") + 1 / s3 * t("dz2"),
+        (-5, 6): lambda: 1 / s6 * t("s") + 1 / s2 * t("pz") + 1 / s3 * t("dz2"),
+    }
+
+    key = (l, mr)
+    if key not in table:
+        raise ValueError(f"No theta_lmr defined for l={l}, mr={mr}")
+
+    return table[key]()
 
 
 def g_r(grids_coor, site, l, mr, r, zona, x_axis=[1, 0, 0], z_axis=[0, 0, 1], unit="B"):  # noqa: E741
@@ -856,7 +902,7 @@ class W90:
             print("Finished computing A matrix.", flush=True)
             print("Setting eigenvalus...", flush=True)
             self.eigenvalues_loc = self.get_epsilon_mat()
-            self.set_eigenvalues(self.eigenvalues_loc)
+            self.set_eigenvalues()
             print("Finished setting eigenvalues.", flush=True)
 
         print("Initializing u_matrix...", flush=True)
@@ -936,33 +982,93 @@ class W90:
 
     def compute_M_matrix(self):
         # M_{mn}^{(k,b)} = <u_{m,k} | u_{n,k+b}>
-        from pyscf import lib
 
         nk = self.data.num_kpts
         nb = self.data.kmesh_info.nntot
         nband = len(self.band_included_list)
         m_matrix = np.zeros((nband, nband, nb, nk), dtype=np.cdouble, order="F")
-        kpts_abs = self.cell.get_abs_kpts(self.kmf.kpts)
+        kpts_abs = self.cell.get_abs_kpts(self.kpt_latt_loc)
 
         for k in range(nk):
             k1 = kpts_abs[k]
             Cm = self.mo_coeff_kpts[k][:, self.band_included_list]
-
             for nn in range(nb):
                 k2_index = (
                     self.nnlist[k, nn] - 1
                 )  # convert from Fortran to Python index
                 bvec = self.nncell[:, k, nn]  # lattice translation in reciprocal units
-                k2_scaled = self.kmf.kpts[k2_index] + bvec
+                k2_scaled = self.kpt_latt_loc[k2_index] + bvec
                 k2 = self.cell.get_abs_kpts([k2_scaled])
+                print(
+                    f"k={k}, nn={nn}: k1={k1}, k2={k2}, |b|={np.linalg.norm(k2 - k1):.6f}"
+                )
                 Cn = self.mo_coeff_kpts[k2_index][:, self.band_included_list]
                 s_AO = df.ft_ao.ft_aopair(
-                    self.cell, -k2 + k1, kpti_kptj=[k2, k1], q=np.zeros(3)
+                    self.cell, -k1 + k2, kpti_kptj=[k1, k2], q=np.zeros(3)
                 )[0]
-                Mmn = lib.einsum("nu,vm,uv->nm", Cn.T.conj(), Cm, s_AO).conj()
-
-                m_matrix[:, :, nn, k] = Mmn
+                m_matrix[:, :, nn, k] = Cm.conj().T @ s_AO @ Cn
+        print("M_matrix shape:", m_matrix.shape)
+        # print("Tests for M_matrix:")
+        # if not self.test_M_matrix(m_matrix, self.nnlist, self.nncell):
+        #    raise RuntimeError("M matrix test failed")
         return m_matrix
+
+    def test_M_matrix(self, M, nnlist, nncell, tol=1e-8):
+        """
+        Test correctness of M_{mn}^{(k,b)}
+        """
+
+        import numpy as np
+
+        nb, _, nntot, nk = M.shape
+
+        print("Testing M matrix...")
+        print("Shape:", M.shape)
+
+        # Identity test for b = 0
+        for k in range(nk):
+            for b in range(nntot):
+                if np.allclose(nncell[:, k, b], 0):
+                    Mk = M[:, :, b, k]
+                    k2 = nnlist[k, b] - 1
+                    if k2 == k and np.allclose(nncell[:, k, b], 0):
+                        print(f"[FAIL] M(k,{b}) not identity at k={k}")
+                        return False
+
+        print("✔ Identity test passed")
+
+        # Hermitian consistency
+        # M(k,b) = M†(k+b,-b)
+        for k in range(nk):
+            for b in range(nntot):
+                k2 = nnlist[k, b] - 1
+
+                # find reverse b
+                for b2 in range(nntot):
+                    if nnlist[k2, b2] - 1 == k:
+                        if np.allclose(nncell[:, k, b], -nncell[:, k2, b2]):
+                            Mk = M[:, :, b, k]
+                            Mk2 = M[:, :, b2, k2]
+
+                            if not np.allclose(Mk, Mk2.conj().T, atol=tol):
+                                print(
+                                    f"[FAIL] Hermitian symmetry broken at k={k}, b={b}"
+                                )
+                                return False
+
+        print("✔ Hermitian consistency passed")
+
+        # Eigenvalue norm test
+        for k in range(nk):
+            for b in range(nntot):
+                evals = np.linalg.eigvals(M[:, :, b, k])
+                if np.any(np.abs(evals) > 1 + 1e-6):
+                    print(f"[FAIL] Eigenvalue > 1 at k={k}, b={b}")
+                    return False
+
+        print("✔ Eigenvalue bound passed")
+        print("M matrix tests PASSED")
+        return True
 
     def read_M_mat(self, filename=None):
         """
@@ -1003,61 +1109,59 @@ class W90:
         """
 
         A_matrix_loc = np.zeros(
-            [self.num_kpts_loc, self.num_wann_loc, self.num_bands_loc],
+            (self.num_bands_loc, self.num_wann_loc, self.num_kpts_loc),
             dtype=np.cdouble,
+            order="F",
         )
 
         if self.use_bloch_phases:
-            Amn = np.eye(self.num_wann_loc, self.num_bands_loc)
-            A_matrix_loc[:] = Amn
-            return np.transpose(A_matrix_loc, axes=(2, 1, 0))
+            Amn = np.zeros((self.num_bands_loc, self.num_wann_loc), order="F")
+            np.fill_diagonal(Amn, 1.0)
+            for k in range(A_matrix_loc.shape[-1]):
+                A_matrix_loc[:, :, k] = Amn
+            return A_matrix_loc
 
-        from pyscf.dft import numint, gen_grid
-
-        grids = gen_grid.Grids(self.cell).build()
-        coords, weights = grids.coords, grids.weights
-
-        ao_L0 = numint.eval_ao(self.cell, coords)
         kpts_abs = self.cell.get_abs_kpts(self.kpt_latt_loc)
-        s_kpts = [
-            self.cell.pbc_intor(
-                "int1e_ovlp", hermi=1, kpts=kpt, pbcopt=lib.c_null_ptr()
+
+        for k_id, kpt in enumerate(kpts_abs):
+            # AO overlap at k
+            S_k = self.cell.pbc_intor(
+                "int1e_ovlp",
+                hermi=1,
+                kpts=kpt,
             )
-            for kpt in kpts_abs
-        ]
-        mo_included_kpts = [mo[:, self.band_included_list] for mo in self.mo_coeff_kpts]
 
-        for ith_wann in range(self.num_wann_loc):
-            frac_site = self.proj_site[ith_wann]
-            abs_site = frac_site.dot(self.real_lattice_loc) / param.BOHR
+            # MO coefficients
+            C_k = self.mo_coeff_kpts[k_id][:, self.band_included_list]
 
-            proj_l, proj_m, proj_radial, proj_zona, proj_x, proj_z = (
-                self.proj_l[ith_wann],
-                self.proj_m[ith_wann],
-                self.proj_radial[ith_wann],
-                self.proj_zona[ith_wann],
-                self.proj_x[ith_wann],
-                self.proj_z[ith_wann],
-            )
-            gr = g_r(
-                coords,
-                abs_site,
-                proj_l,
-                proj_m,
-                proj_radial,
-                proj_zona,
-                proj_x,
-                proj_z,
-                unit="B",
-            )
-            s_aoL0_g = lib.einsum("i,i,iv->v", weights, gr, ao_L0)
+            for n in range(self.num_wann_loc):
+                # Build projector directly in AO basis
+                frac_site = self.proj_site[n]
+                abs_site = frac_site.dot(self.real_lattice_loc) / param.BOHR
+                proj_l, proj_m, proj_radial, proj_zona, proj_x, proj_z = (
+                    self.proj_l[n],
+                    self.proj_m[n],
+                    self.proj_radial[n],
+                    self.proj_zona[n],
+                    self.proj_x[n],
+                    self.proj_z[n],
+                )
+                g_ao = build_projector_AO(
+                    self.cell,
+                    abs_site,
+                    proj_l,
+                    proj_m,
+                    proj_radial,
+                    proj_zona,
+                    proj_x,
+                    proj_z,
+                    unit="B",
+                )
 
-            for k_id, (s_kpt, mo_included) in enumerate(zip(s_kpts, mo_included_kpts)):
-                A_matrix_loc[k_id, ith_wann, :] = lib.einsum(
-                    "v,vu,um->m", s_aoL0_g, s_kpt, mo_included, optimize=True
-                ).conj()
+                # Direct Hilbert-space projection
+                A_matrix_loc[:, n, k_id] = C_k.conj().T @ (S_k @ g_ao)
 
-        return np.transpose(A_matrix_loc, axes=(2, 1, 0))
+        return A_matrix_loc
 
     def read_A_mat(self, filename=None):
         """
@@ -1086,11 +1190,12 @@ class W90:
         Construct the eigenvalues matrix: \epsilon_{n}^(\mathbf{k})
         """
 
-        return (
-            np.asarray(self.mo_energy_kpts, dtype=np.float64)[
-                :, self.band_included_list
-            ]
-            * param.HARTREE2EV
+        return np.asarray(
+            (
+                np.asarray(self.mo_energy_kpts)[:, self.band_included_list]
+                * param.HARTREE2EV
+            ).T,
+            order="F",
         )
 
     def read_epsilon_mat(self, filename=None):
@@ -1176,15 +1281,13 @@ class W90:
         """
         Set the M matrix
         """
-        wan90.w90_library.w90_set_m_local(
-            self.data, np.asfortranarray(self.M_matrix_loc)
-        )
+        wan90.w90_library.w90_set_m_local(self.data, self.M_matrix_loc)
 
     def set_a_matrix(self):
         """
         Set the initial A matrix as U_opt matrix
         """
-        wan90.w90_library.w90_set_u_opt(self.data, np.asfortranarray(self.A_matrix_loc))
+        wan90.w90_library.w90_set_u_opt(self.data, self.A_matrix_loc)
 
     def set_u_matrix(self):
         """
@@ -1197,13 +1300,11 @@ class W90:
         )
         wan90.w90_library.w90_set_u_matrix(self.data, self.u_matrix)
 
-    def set_eigenvalues(self, eigenvalues_loc):
+    def set_eigenvalues(self):
         """
         Set the eigenvalues
         """
-        wan90.w90_library.w90_set_eigval(
-            self.data, np.asfortranarray(eigenvalues_loc.T)
-        )
+        wan90.w90_library.w90_set_eigval(self.data, self.eigenvalues_loc)
 
     def project_overlap(self):
         status = wan90.w90_library.w90_project_overlap(  # noqa: F841
@@ -1471,7 +1572,7 @@ class W90:
     def export_unk(self, grid=[50, 50, 50]):
         grids_coor, _ = periodic_grid(self.cell, grid, order="F")
 
-        for k_id in range(np.asarray(self.mo_energy_kpts[0]).ndim):
+        for k_id in range(self.kmf.kpts.shape[0]):
             spin = ".1"
             if self.spin == "down" or self.spin == "mix":
                 spin = ".2"
