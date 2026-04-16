@@ -56,4 +56,4 @@ w90 = pywannier90.W90(kmf, cell, nk, num_wann, gamma=True, other_keywords=keywor
 
 
 w90.kernel()
-w90.plot_wf(grid=[60, 60, 60])
+w90.plot_wf(grid=[60, 60, 60], fmt="cube")
