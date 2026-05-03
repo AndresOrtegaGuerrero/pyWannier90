@@ -16,74 +16,71 @@ from pyscf.pbc import df
 from pyscf.pbc.dft import numint
 
 
-def build_projector_AO(
-    cell,
-    site,
-    l,  # noqa: E741
-    mr,
-    radial,
-    zona,
-    x_axis=(1, 0, 0),
-    z_axis=(0, 0, 1),
-    unit="B",
-    mesh=None,
+def build_projectors_AO(
+    cell, sites, l_arr, mr_arr, radial_arr, zona_arr, x_arr, z_arr, unit="B", mesh=None
 ):
     """
-    General Wannier90-style projector builder.
-
-    Computes:
-        A_mu = ∫ χ_mu(r) g_{l,mr}(r) dr
-
     Parameters
     ----------
     cell : PySCF cell
-    site : absolute coordinate of projector center (Bohr or Angstrom)
-    l, mr : angular quantum numbers (Wannier90 convention)
-    radial : radial index (1,2,3...)
-    zona : zeta parameter
-    x_axis, z_axis : orientation axes
+    sites : array (nwann, 3)
+        Absolute centers of each trial in `unit`.
+    l_arr, mr_arr : array-like (nwann,)
+        Wannier90 angular quantum numbers (l, mr) per trial.
+    radial_arr : array-like (nwann,)
+        Radial index r ∈ {1, 2, 3}.
+    zona_arr : array-like (nwann,)
+        Radial decay parameter Zₐ.
+    x_arr, z_arr : array (nwann, 3)
+        Local-frame x and z axes per trial.
     unit : "B" or "A"
-    mesh : optional real-space mesh (tuple)
+        Units of `sites`.  "B" = Bohr (no conversion), "A" = Angstrom.
+    mesh : tuple of int, optional
+        Real-space FFT mesh; defaults to cell.mesh.
 
     Returns
     -------
-    g_ao : numpy array (nao,)
+    G : ndarray (nao, nwann), complex128, Fortran-ordered
+
     """
+    import numpy as np
+    from pyscf.data import nist as param
 
-    from pyscf import lib
-
-    if unit == "A":
-        site = site / 0.529177  # convert to Bohr
-
-    # Real-space grid
     if mesh is None:
-        mesh = cell.mesh  # default FFT mesh
+        mesh = cell.mesh
 
-    coords = get_uniform_grids(cell, mesh=mesh, order="C")  # shape (ngrid, 3)
+    coords = get_uniform_grids(cell, mesh=mesh, order="C")  # (ngrid, 3) in Bohr
     ngrid = coords.shape[0]
-    # uniform weight
     weight = cell.vol / ngrid
-    # Evaluate AO basis
-    ao_vals = cell.eval_gto("GTOval", coords)
-    # shape (ngrid, nao)
 
-    # Evaluate g(r)
-    gvals = g_r(
-        coords,
-        site,
-        l,  # noqa: E741
-        mr,
-        radial,
-        zona,
-        x_axis=x_axis,
-        z_axis=z_axis,
-        unit="B",
-    )
+    # ── AO evaluation: the expensive step. Done once, reused for every trial.
+    ao_vals = cell.eval_gto("GTOval", coords)  # (ngrid, nao), real
 
-    # Numerical integration
-    g_ao = lib.einsum("gm,g->m", ao_vals, gvals) * weight
+    sites = np.asarray(sites, dtype=float)
+    if sites.ndim == 1:  # accept a single site too
+        sites = sites[np.newaxis, :]
+    nwann = sites.shape[0]
+    # nao = ao_vals.shape[1]
 
-    return g_ao
+    # Build each trial's grid values into one (ngrid, nwann) stack so the
+    # final AO contraction is a single BLAS matmul.
+    gmat = np.zeros((ngrid, nwann), dtype=np.complex128)
+    for n in range(nwann):
+        site_n = sites[n] / param.BOHR if unit == "A" else sites[n]
+        gmat[:, n] = g_r(
+            coords,
+            site_n,
+            int(l_arr[n]),
+            int(mr_arr[n]),
+            int(radial_arr[n]),
+            float(zona_arr[n]),
+            x_axis=x_arr[n],
+            z_axis=z_arr[n],
+            unit="B",
+        )
+
+    G = (ao_vals.T @ gmat) * weight  # (nao, nwann), complex128
+    return np.asfortranarray(G)
 
 
 def build_projector_AO_pz(cell, center, zeta):
@@ -724,8 +721,10 @@ def scdm_projection(cell, mo_coeff, kpts, use_gamma_perm, nlo, cholesky=False):
     for k in range(nkpts):
         # AO on grids
         ao_g = numint.eval_ao(cell, coords, kpt=kpts[k], deriv=0) * weights_factor
+        phase = np.exp(-1j * (coords @ kpts[k]))
+        ao_g = ao_g * phase[:, None]
         for s in range(spin):
-            mo_g = np.dot(ao_g, mo_coeff[s, k])
+            mo_g = ao_g @ mo_coeff[s, k]
             psiT = mo_g.conj().T
             if use_gamma_perm:
                 if k == 0:
@@ -1143,28 +1142,25 @@ class W90:
             C_mo_lo = scdm_projection(cell, mo_coeff, kpts, self.scdm_gamma_perm, nlo)[
                 1
             ]
-            A_matrix_loc[:, :, :] = C_mo_lo[0].transpose(2, 1, 0)  # spin 1
+            A_matrix_loc[:, :, :] = C_mo_lo[0].transpose(1, 2, 0)  # spin 1
+
             return A_matrix_loc
 
         # Compute AO projectors
-        G = np.zeros(
-            (self.cell.nao_nr(), self.num_wann_loc), dtype=np.complex128, order="F"
+        abs_sites = (
+            self.proj_site @ self.real_lattice_loc / param.BOHR
+        )  # (nwann, 3) in Bohr
+        G = build_projectors_AO(
+            self.cell,
+            abs_sites,
+            self.proj_l,
+            self.proj_m,
+            self.proj_radial,
+            self.proj_zona,
+            self.proj_x,
+            self.proj_z,
+            unit="B",
         )
-        for n in range(self.num_wann_loc):
-            frac_site = self.proj_site[n]
-            abs_site = frac_site.dot(self.real_lattice_loc) / param.BOHR
-
-            G[:, n] = build_projector_AO(
-                self.cell,
-                abs_site,
-                self.proj_l[n],
-                self.proj_m[n],
-                self.proj_radial[n],
-                self.proj_zona[n],
-                self.proj_x[n],
-                self.proj_z[n],
-                unit="B",
-            )
 
         # Look over k-points
         kpts_abs = self.cell.get_abs_kpts(self.kpt_latt_loc)
