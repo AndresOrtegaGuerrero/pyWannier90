@@ -17,7 +17,17 @@ from pyscf.pbc.dft import numint
 
 
 def build_projectors_AO(
-    cell, sites, l_arr, mr_arr, radial_arr, zona_arr, x_arr, z_arr, unit="B", mesh=None
+    cell,
+    sites,
+    l_arr,
+    mr_arr,
+    radial_arr,
+    zona_arr,
+    x_arr,
+    z_arr,
+    unit="B",
+    mesh=None,
+    blksize=1_000_000,
 ):
     """
     Parameters
@@ -37,50 +47,54 @@ def build_projectors_AO(
         Units of `sites`.  "B" = Bohr (no conversion), "A" = Angstrom.
     mesh : tuple of int, optional
         Real-space FFT mesh; defaults to cell.mesh.
+    blksize : Block size for AO evaluation; adjust to balance memory use and speed.
 
     Returns
     -------
     G : ndarray (nao, nwann), complex128, Fortran-ordered
-
     """
+
     import numpy as np
     from pyscf.data import nist as param
 
     if mesh is None:
         mesh = cell.mesh
-
-    coords = get_uniform_grids(cell, mesh=mesh, order="C")  # (ngrid, 3) in Bohr
+    coords = get_uniform_grids(cell, mesh=mesh, order="C")
     ngrid = coords.shape[0]
     weight = cell.vol / ngrid
 
-    # ── AO evaluation: the expensive step. Done once, reused for every trial.
-    ao_vals = cell.eval_gto("GTOval", coords)  # (ngrid, nao), real
-
-    sites = np.asarray(sites, dtype=float)
-    if sites.ndim == 1:  # accept a single site too
-        sites = sites[np.newaxis, :]
+    sites = np.atleast_2d(np.asarray(sites, dtype=float))
+    if unit == "A":
+        sites = sites / param.BOHR
     nwann = sites.shape[0]
-    # nao = ao_vals.shape[1]
 
-    # Build each trial's grid values into one (ngrid, nwann) stack so the
-    # final AO contraction is a single BLAS matmul.
-    gmat = np.zeros((ngrid, nwann), dtype=np.complex128)
-    for n in range(nwann):
-        site_n = sites[n] / param.BOHR if unit == "A" else sites[n]
-        gmat[:, n] = g_r(
-            coords,
-            site_n,
-            int(l_arr[n]),
-            int(mr_arr[n]),
-            int(radial_arr[n]),
-            float(zona_arr[n]),
-            x_axis=x_arr[n],
-            z_axis=z_arr[n],
-            unit="B",
-        )
+    nao = cell.nao_nr()
+    # g_r is real-valued for std Wannier90 trials → keep float64, cast once at the end
+    G = np.zeros((nao, nwann), dtype=np.float64)
 
-    G = (ao_vals.T @ gmat) * weight  # (nao, nwann), complex128
-    return np.asfortranarray(G)
+    for s in range(0, ngrid, blksize):
+        e = min(s + blksize, ngrid)
+        coords_blk = coords[s:e]  # (b, 3)
+        ao_blk = cell.eval_gto("GTOval", coords_blk)  # (b, nao)
+
+        gmat_blk = np.empty((e - s, nwann), dtype=np.float64)
+        for n in range(nwann):
+            gmat_blk[:, n] = g_r(
+                coords_blk,
+                sites[n],
+                int(l_arr[n]),
+                int(mr_arr[n]),
+                int(radial_arr[n]),
+                float(zona_arr[n]),
+                x_axis=x_arr[n],
+                z_axis=z_arr[n],
+                unit="B",
+            )
+
+        G += ao_blk.T @ gmat_blk  # one BLAS call per block
+
+    G *= weight
+    return np.asfortranarray(G.astype(np.complex128))
 
 
 def build_projector_AO_pz(cell, center, zeta):
@@ -824,6 +838,11 @@ class W90:
         self.use_bloch_phases = False
         self.spin = spin
 
+        # Memory related settings
+        self.settings = {
+            "blksize": 1_000_000,
+        }
+
         self.mo_energy_kpts = []
         self.mo_coeff_kpts = []
         if np.asarray(kmf.mo_energy_kpts).ndim == 3:
@@ -1160,6 +1179,7 @@ class W90:
             self.proj_x,
             self.proj_z,
             unit="B",
+            blksize=self.settings["blksize"],
         )
 
         # Look over k-points
