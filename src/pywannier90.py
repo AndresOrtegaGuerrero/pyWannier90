@@ -29,6 +29,31 @@ def build_projectors_AO(
     mesh=None,
     blksize=1_000_000,
 ):
+    """
+    Parameters
+    ----------
+    cell : PySCF cell
+    sites : array (nwann, 3)
+        Absolute centers of each trial in `unit`.
+    l_arr, mr_arr : array-like (nwann,)
+        Wannier90 angular quantum numbers (l, mr) per trial.
+    radial_arr : array-like (nwann,)
+        Radial index r ∈ {1, 2, 3}.
+    zona_arr : array-like (nwann,)
+        Radial decay parameter Zₐ.
+    x_arr, z_arr : array (nwann, 3)
+        Local-frame x and z axes per trial.
+    unit : "B" or "A"
+        Units of `sites`.  "B" = Bohr (no conversion), "A" = Angstrom.
+    mesh : tuple of int, optional
+        Real-space FFT mesh; defaults to cell.mesh.
+    blksize : Block size for AO evaluation; adjust to balance memory use and speed.
+
+    Returns
+    -------
+    G : ndarray (nao, nwann), complex128, Fortran-ordered
+    """
+
     import numpy as np
     from pyscf.data import nist as param
 
